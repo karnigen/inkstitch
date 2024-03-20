@@ -1,1 +1,1 @@
-only test 2
+only test 10 [no ci]
