@@ -28,6 +28,7 @@ dependencies = [
     "flask-cors",
     "pywinutils ; sys_platform == 'win32'",
     "pywin32 ; sys_platform == 'win32'",
+    "numba>=0.59.0",
 ]
 
 [dependency-groups]
