@@ -3,6 +3,10 @@
 from pathlib import Path
 import sys
 import os
+import argparse
+
+#-------------------------------------------------------------------
+# Dual run: python3 or .venv python
 
 script_dir = Path(__file__).resolve().parent
 venv_dir = (script_dir / ".." / ".venv").resolve()
@@ -25,12 +29,31 @@ def ensure_venv():
 
 # start the virtual environment if not already active
 ensure_venv()
+#-------------------------------------------------------------------
 
 import wx
 
-def main():
-    print("PES Viewer")
+class MainFrame(wx.Frame):
+    def __init__(self, initial_file=None):
+        super().__init__(None, title="PES Viewer", size=(1000, 700))
+        self.initial_file = initial_file
+
+        self.panel = wx.Panel(self)
+        self.panel.SetBackgroundColour(wx.Colour(240, 240, 240))
+
+        self.Centre()
+        self.Show()
+
+        if self.initial_file:
+            print(f"Target file passed: {self.initial_file}")
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="PES Viewer")
+    parser.add_argument("pes_file", nargs="?", help="Input .pes file")
+    args = parser.parse_args()
+
+    app = wx.App()
+    MainFrame(initial_file=args.pes_file)
+    app.MainLoop()
+
 
