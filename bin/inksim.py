@@ -31,84 +31,81 @@ def ensure_venv():
 ensure_venv()
 #-------------------------------------------------------------------
 
+
 import wx
 import numpy as np
 import pystitch as emb
 
-class FitCanvas(wx.Panel):
+class BitmapCanvas(wx.Panel):
     def __init__(self, parent):
         super().__init__(parent)
         self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
 
         self.stitches_np = np.zeros((0, 7), dtype=np.float32)
-        self.bounds = (0.0, 0.0, 0.0, 0.0)
         self.zoom = 1.0
-        self.pan_x, self.pan_y = 0.0, 0.0
+        self.pan_x, self.pan_y = 400.0, 300.0
+
+        self.cached_bitmap = None
+        self.need_redraw = True
 
         self.Bind(wx.EVT_PAINT, self.OnPaint)
-        self.Bind(wx.EVT_KEY_DOWN, self.OnKeyDown)
-        self.SetFocus()
+        self.Bind(wx.EVT_SIZE, self.OnSize)
 
-    def FitToScreen(self):
-        if self.stitches_np.shape[0] == 0:
-            return
+    def OnSize(self, event):
+        self.need_redraw = True
+        event.Skip()
 
-        min_x, min_y, max_x, max_y = self.bounds
-        bw = max(1.0, max_x - min_x)
-        bh = max(1.0, max_y - min_y)
+    def render_to_buffer(self, w, h):
+        # Create pure RGB pixel array initialized to white (255)
+        buf = np.full((h, w, 3), 255, dtype=np.uint8)
 
-        w, h = self.GetSize()
-        if w < 10 or h < 10:
-            w, h = 1000, 700
+        # Simple software line rasterization into numpy buffer
+        for row in self.stitches_np:
+            x1 = int(row[0] * self.zoom + self.pan_x)
+            y1 = int(row[1] * self.zoom + self.pan_y)
+            x2 = int(row[2] * self.zoom + self.pan_x)
+            y2 = int(row[3] * self.zoom + self.pan_y)
 
-        zoom_x = (w * 0.8) / bw
-        zoom_y = (h * 0.8) / bh
-        self.zoom = min(zoom_x, zoom_y)
+            # Simple bounds check
+            if 0 <= x1 < w and 0 <= y1 < h:
+                buf[y1, x1] = [int(row[4]), int(row[5]), int(row[6])]
+            if 0 <= x2 < w and 0 <= y2 < h:
+                buf[y2, x2] = [int(row[4]), int(row[5]), int(row[6])]
 
-        cx = (min_x + max_x) / 2.0
-        cy = (min_y + max_y) / 2.0
-        self.pan_x = w / 2.0 - cx * self.zoom
-        self.pan_y = h / 2.0 - cy * self.zoom
-        self.Refresh()
-
-    def load_stitches(self, segs):
-        if segs:
-            self.stitches_np = np.array(segs, dtype=np.float32)
-            self.bounds = (
-                float(np.min(self.stitches_np[:, [0, 2]])),
-                float(np.min(self.stitches_np[:, [1, 3]])),
-                float(np.max(self.stitches_np[:, [0, 2]])),
-                float(np.max(self.stitches_np[:, [1, 3]]))
-            )
-            wx.CallAfter(self.FitToScreen)
-
-    def OnKeyDown(self, event):
-        key = event.GetKeyCode()
-        if key in (70, 102):  # 'F' or 'f'
-            self.FitToScreen()
-        else:
-            event.Skip()
+        # Convert RGB numpy buffer to wx.Bitmap
+        img = wx.Image(w, h)
+        img.SetData(buf.tobytes())
+        return wx.Bitmap(img)
 
     def OnPaint(self, event):
         dc = wx.PaintDC(self)
-        dc.Clear()
-        for row in self.stitches_np:
-            sx1 = int(row[0] * self.zoom + self.pan_x)
-            sy1 = int(row[1] * self.zoom + self.pan_y)
-            sx2 = int(row[2] * self.zoom + self.pan_x)
-            sy2 = int(row[3] * self.zoom + self.pan_y)
-            dc.SetPen(wx.Pen(wx.Colour(int(row[4]), int(row[5]), int(row[6])), 1))
-            dc.DrawLine(sx1, sy1, sx2, sy2)
+
+        if not self.need_redraw and self.cached_bitmap:
+            dc.DrawBitmap(self.cached_bitmap, 0, 0)
+            return
+
+        w, h = self.GetSize()
+        if w < 1 or h < 1:
+            return
+
+        self.cached_bitmap = self.render_to_buffer(w, h)
+        self.need_redraw = False
+        dc.DrawBitmap(self.cached_bitmap, 0, 0)
 
 class MainFrame(wx.Frame):
     def __init__(self, initial_file=None):
-        super().__init__(None, title="PES Viewer - Step 7 (Fit To Screen - Press 'F')", size=(1000, 700))
-        self.canvas = FitCanvas(self)
+        super().__init__(None, title="PES Viewer - Step 8 (Bitmap Buffer Rendering)", size=(1000, 700))
+        self.canvas = BitmapCanvas(self)
 
         if initial_file and os.path.exists(initial_file):
             pattern = emb.read(initial_file)
-            segs = [(0, 0, st[0]/10.0, st[1]/10.0, 30, 160, 30) for st in pattern.stitches]
-            self.canvas.load_stitches(segs)
+            segs = []
+            lx, ly = 0.0, 0.0
+            for st in pattern.stitches:
+                x, y = st[0]/10.0, st[1]/10.0
+                segs.append((lx, ly, x, y, 220, 80, 40))
+                lx, ly = x, y
+            self.canvas.stitches_np = np.array(segs, dtype=np.float32)
 
         self.Centre()
         self.Show()
