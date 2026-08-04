@@ -34,35 +34,77 @@ ensure_venv()
 import wx
 import pystitch as emb
 
-class PesCanvasPanel(wx.Panel):
+class InteractiveCanvas(wx.Panel):
     def __init__(self, parent):
         super().__init__(parent)
         self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
-        self.stitches = []
-        self.Bind(wx.EVT_PAINT, self.OnPaint)
 
-    def set_stitches(self, stitches):
-        self.stitches = stitches
-        self.Refresh()
+        self.stitches = []
+        self.zoom = 1.0
+        self.pan_x = 400.0
+        self.pan_y = 300.0
+
+        self.drag_start = None
+        self.pan_start = (0, 0)
+
+        self.Bind(wx.EVT_PAINT, self.OnPaint)
+        self.Bind(wx.EVT_MOUSEWHEEL, self.OnWheel)
+        self.Bind(wx.EVT_LEFT_DOWN, self.OnLeftDown)
+        self.Bind(wx.EVT_LEFT_UP, self.OnLeftUp)
+        self.Bind(wx.EVT_MOTION, self.OnMotion)
 
     def OnPaint(self, event):
         dc = wx.PaintDC(self)
         dc.Clear()
 
-        if not self.stitches:
-            dc.DrawText("No file loaded or empty file", 20, 20)
-            return
-
-        # Simple 1:1 render with hardcoded offset
-        offset_x, offset_y = 200, 200
         for x1, y1, x2, y2, r, g, b in self.stitches:
+            sx1 = int(x1 * self.zoom + self.pan_x)
+            sy1 = int(y1 * self.zoom + self.pan_y)
+            sx2 = int(x2 * self.zoom + self.pan_x)
+            sy2 = int(y2 * self.zoom + self.pan_y)
+
             dc.SetPen(wx.Pen(wx.Colour(r, g, b), 1))
-            dc.DrawLine(int(x1 + offset_x), int(y1 + offset_y), int(x2 + offset_x), int(y2 + offset_y))
+            dc.DrawLine(sx1, sy1, sx2, sy2)
+
+    def OnWheel(self, event):
+        mx, my = event.GetPosition()
+        old_zoom = self.zoom
+
+        if event.GetWheelRotation() > 0:
+            self.zoom *= 1.15
+        else:
+            self.zoom /= 1.15
+
+        self.zoom = max(0.1, min(30.0, self.zoom))
+
+        scale = self.zoom / old_zoom
+        self.pan_x = mx - scale * (mx - self.pan_x)
+        self.pan_y = my - scale * (my - self.pan_y)
+        self.Refresh()
+
+    def OnLeftDown(self, event):
+        self.drag_start = event.GetPosition()
+        self.pan_start = (self.pan_x, self.pan_y)
+        self.CaptureMouse()
+
+    def OnLeftUp(self, event):
+        if self.HasCapture():
+            self.ReleaseMouse()
+        self.drag_start = None
+
+    def OnMotion(self, event):
+        if self.drag_start and event.Dragging() and event.LeftIsDown():
+            pos = event.GetPosition()
+            dx = pos[0] - self.drag_start[0]
+            dy = pos[1] - self.drag_start[1]
+            self.pan_x = self.pan_start[0] + dx
+            self.pan_y = self.pan_start[1] + dy
+            self.Refresh()
 
 class MainFrame(wx.Frame):
     def __init__(self, initial_file=None):
-        super().__init__(None, title="PES Viewer - Step 4", size=(1000, 700))
-        self.canvas = PesCanvasPanel(self)
+        super().__init__(None, title="PES Viewer - Step 5 (Zoom & Pan)", size=(1000, 700))
+        self.canvas = InteractiveCanvas(self)
 
         if initial_file and os.path.exists(initial_file):
             pattern = emb.read(initial_file)
@@ -70,9 +112,9 @@ class MainFrame(wx.Frame):
             lx, ly = 0, 0
             for st in pattern.stitches:
                 x, y = st[0]/10.0, st[1]/10.0
-                segs.append((lx, ly, x, y, 200, 50, 50))
+                segs.append((lx, ly, x, y, 0, 100, 200))
                 lx, ly = x, y
-            self.canvas.set_stitches(segs)
+            self.canvas.stitches = segs
 
         self.Centre()
         self.Show()
