@@ -46,58 +46,82 @@ except ImportError:
         return decorator
 
 @njit(fastmath=True)
-def render_grid_numba(buf, width, height, zoom, pan_x, pan_y, grid_step_mm=10.0):
-    """Renders background millimeter grid directly into RGB numpy buffer."""
-    # Background fill (light grey/white canvas: 245, 245, 245)
-    buf[:, :, 0] = 245
-    buf[:, :, 1] = 245
-    buf[:, :, 2] = 245
+def draw_line_shaded(buf, width, height, x0, y0, x1, y1, r, g, b, thickness=1):
+    """Bresenham-based line rendering with 3D thread shading effect."""
+    dx = abs(x1 - x0)
+    dy = abs(y1 - y0)
+    sx = 1 if x0 < x1 else -1
+    sy = 1 if y0 < y1 else -1
+    err = dx - dy
 
-    step_px = grid_step_mm * zoom
-    if step_px < 5.0:  # Don't draw grid if lines are too dense
-        return
+    x, y = x0, y0
+    total_steps = max(dx, dy)
+    step = 0
 
-    # Calculate visible world coordinates
-    start_x_mm = -pan_x / zoom
-    end_x_mm = (width - pan_x) / zoom
-    start_y_mm = -pan_y / zoom
-    end_y_mm = (height - pan_y) / zoom
+    while True:
+        if 0 <= x < width and 0 <= y < height:
+            # Calculate subtle shading factor along line (thread highlight)
+            factor = 1.0
+            if total_steps > 0:
+                progress = step / total_steps
+                factor = 0.85 + 0.3 * np.sin(progress * np.pi)  # Lighter in middle
 
-    first_grid_x = int(np.floor(start_x_mm / grid_step_mm)) * grid_step_mm
-    first_grid_y = int(np.floor(start_y_mm / grid_step_mm)) * grid_step_mm
+            cr = min(255, int(r * factor))
+            cg = min(255, int(g * factor))
+            cb = min(255, int(b * factor))
 
-    # Vertical grid lines
-    curr_x = first_grid_x
-    while curr_x <= end_x_mm:
-        px = int(curr_x * zoom + pan_x)
-        if 0 <= px < width:
-            is_axis = abs(curr_x) < 1e-3
-            color = 120 if is_axis else 220
-            for y in range(height):
-                buf[y, px, 0] = color
-                buf[y, px, 1] = color
-                buf[y, px, 2] = color
-        curr_x += grid_step_mm
+            buf[y, x, 0] = cr
+            buf[y, x, 1] = cg
+            buf[y, x, 2] = cb
 
-    # Horizontal grid lines
-    curr_y = first_grid_y
-    while curr_y <= end_y_mm:
-        py = int(curr_y * zoom + pan_y)
-        if 0 <= py < height:
-            is_axis = abs(curr_y) < 1e-3
-            color = 120 if is_axis else 220
-            for x in range(width):
-                buf[py, x, 0] = color
-                buf[py, x, 1] = color
-                buf[py, x, 2] = color
-        curr_y += grid_step_mm
+            # Apply thickness offset if requested
+            if thickness > 1:
+                if dx > dy:
+                    if y + 1 < height: buf[y + 1, x] = [cr, cg, cb]
+                else:
+                    if x + 1 < width: buf[y, x + 1] = [cr, cg, cb]
 
-class GridCanvas(wx.Panel):
+        if x == x1 and y == y1:
+            break
+
+        e2 = 2 * err
+        if e2 > -dy:
+            err -= dy
+            x += sx
+        if e2 < dx:
+            err += dx
+            y += sy
+        step += 1
+
+@njit(fastmath=True)
+def render_shaded_numba(buf, stitches, width, height, zoom, pan_x, pan_y, line_width=1):
+    """Iterates all stitches, performs frustum culling, and renders shaded lines."""
+    n_stitches = stitches.shape[0]
+    for i in range(n_stitches):
+        st = stitches[i]
+
+        # Transform world coordinates to screen space
+        sx0 = int(st[0] * zoom + pan_x)
+        sy0 = int(st[1] * zoom + pan_y)
+        sx1 = int(st[2] * zoom + pan_x)
+        sy1 = int(st[3] * zoom + pan_y)
+
+        # Frustum culling (skip line if completely outside screen)
+        if (sx0 < 0 and sx1 < 0) or (sx0 >= width and sx1 >= width):
+            continue
+        if (sy0 < 0 and sy1 < 0) or (sy0 >= height and sy1 >= height):
+            continue
+
+        r, g, b = int(st[4]), int(st[5]), int(st[6])
+        draw_line_shaded(buf, width, height, sx0, sy0, sx1, sy1, r, g, b, line_width)
+
+class FastShadedCanvas(wx.Panel):
     def __init__(self, parent):
         super().__init__(parent)
         self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
-        self.zoom = 5.0
-        self.pan_x, self.pan_y = 500.0, 350.0
+        self.stitches_np = np.zeros((0, 7), dtype=np.float32)
+        self.zoom = 2.5
+        self.pan_x, self.pan_y = 400.0, 300.0
 
         self.Bind(wx.EVT_PAINT, self.OnPaint)
 
@@ -107,21 +131,38 @@ class GridCanvas(wx.Panel):
         if w < 1 or h < 1:
             return
 
-        buf = np.zeros((h, w, 3), dtype=np.uint8)
-        render_grid_numba(buf, w, h, self.zoom, self.pan_x, self.pan_y)
+        buf = np.full((h, w, 3), 245, dtype=np.uint8)
+
+        if self.stitches_np.shape[0] > 0:
+            render_shaded_numba(buf, self.stitches_np, w, h, self.zoom, self.pan_x, self.pan_y, line_width=1)
 
         img = wx.Image(w, h)
         img.SetData(buf.tobytes())
         dc.DrawBitmap(wx.Bitmap(img), 0, 0)
 
 class MainFrame(wx.Frame):
-    def __init__(self):
-        super().__init__(None, title=f"PES Viewer - Step 10 (Fast Numba Grid)", size=(1000, 700))
-        self.canvas = GridCanvas(self)
+    def __init__(self, initial_file=None):
+        super().__init__(None, title="PES Viewer - Step 11 (Numba Shaded Stitches)", size=(1000, 700))
+        self.canvas = FastShadedCanvas(self)
+
+        if initial_file and os.path.exists(initial_file):
+            pattern = emb.read(initial_file)
+            segs = []
+            lx, ly = 0.0, 0.0
+            for st in pattern.stitches:
+                x, y = st[0]/10.0, st[1]/10.0
+                segs.append((lx, ly, x, y, 180, 40, 90))
+                lx, ly = x, y
+            self.canvas.stitches_np = np.array(segs, dtype=np.float32)
+
         self.Centre()
         self.Show()
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("pes_file", nargs="?", help="Input .pes file")
+    args = parser.parse_args()
+
     app = wx.App()
-    MainFrame()
+    MainFrame(initial_file=args.pes_file)
     app.MainLoop()
