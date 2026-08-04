@@ -32,57 +32,47 @@ ensure_venv()
 #-------------------------------------------------------------------
 
 import wx
+import pystitch as emb
 
-try:
-    import pystitch as emb
-    HAS_EMB = True
-except ImportError:
-    try:
-        import pyembroidery as emb
-        HAS_EMB = True
-    except ImportError:
-        HAS_EMB = False
+class PesCanvasPanel(wx.Panel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
+        self.stitches = []
+        self.Bind(wx.EVT_PAINT, self.OnPaint)
 
-class PesLoader:
-    @staticmethod
-    def load(path):
-        if not HAS_EMB:
-            raise RuntimeError("No embroidery parser library found!")
+    def set_stitches(self, stitches):
+        self.stitches = stitches
+        self.Refresh()
 
-        pattern = emb.read(path)
-        segments = []
-        last_x, last_y = 0.0, 0.0
-        cur_color = (200, 30, 30)
+    def OnPaint(self, event):
+        dc = wx.PaintDC(self)
+        dc.Clear()
 
-        for st in pattern.stitches:
-            x, y = st[0] / 10.0, st[1] / 10.0
-            cmd = st[2] if len(st) > 2 else 0
+        if not self.stitches:
+            dc.DrawText("No file loaded or empty file", 20, 20)
+            return
 
-            # Jump stitch
-            if hasattr(emb, 'JUMP') and cmd == emb.JUMP:
-                last_x, last_y = x, y
-                continue
-            # End of pattern
-            if hasattr(emb, 'END') and cmd == emb.END:
-                break
-
-            segments.append((last_x, last_y, x, y, cur_color[0], cur_color[1], cur_color[2]))
-            last_x, last_y = x, y
-
-        return segments
+        # Simple 1:1 render with hardcoded offset
+        offset_x, offset_y = 200, 200
+        for x1, y1, x2, y2, r, g, b in self.stitches:
+            dc.SetPen(wx.Pen(wx.Colour(r, g, b), 1))
+            dc.DrawLine(int(x1 + offset_x), int(y1 + offset_y), int(x2 + offset_x), int(y2 + offset_y))
 
 class MainFrame(wx.Frame):
     def __init__(self, initial_file=None):
-        super().__init__(None, title="PES Viewer - Step 3", size=(1000, 700))
-        self.panel = wx.Panel(self)
+        super().__init__(None, title="PES Viewer - Step 4", size=(1000, 700))
+        self.canvas = PesCanvasPanel(self)
 
         if initial_file and os.path.exists(initial_file):
-            try:
-                stitches = PesLoader.load(initial_file)
-                print(f"Loaded {len(stitches)} stitches successfully.")
-                self.SetTitle(f"PES Viewer - {os.path.basename(initial_file)} ({len(stitches)} stitches)")
-            except Exception as e:
-                print(f"Error loading file: {e}")
+            pattern = emb.read(initial_file)
+            segs = []
+            lx, ly = 0, 0
+            for st in pattern.stitches:
+                x, y = st[0]/10.0, st[1]/10.0
+                segs.append((lx, ly, x, y, 200, 50, 50))
+                lx, ly = x, y
+            self.canvas.set_stitches(segs)
 
         self.Centre()
         self.Show()
