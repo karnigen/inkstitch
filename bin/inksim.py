@@ -32,93 +32,56 @@ ensure_venv()
 #-------------------------------------------------------------------
 
 import wx
-import numpy as np
-
-class SeekingProgressBar(wx.Panel):
-    def __init__(self, parent, on_seek_callback=None):
-        super().__init__(parent, size=(-1, 58))
-        self.SetMinSize((-1, 58))
-        self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
-
-        self.on_seek_callback = on_seek_callback
-        self.total_stitches = 1000
-        self.visible_count = 500
-        self.is_dragging = False
-
-        self.Bind(wx.EVT_PAINT, self.OnPaint)
-        self.Bind(wx.EVT_LEFT_DOWN, self.OnLeftDown)
-        self.Bind(wx.EVT_LEFT_UP, self.OnLeftUp)
-        self.Bind(wx.EVT_MOTION, self.OnMotion)
-
-    def UpdateSeekFromMouse(self, mouse_x):
-        w, _ = self.GetClientSize()
-        track_x = 15
-        track_w = max(10, w - 2 * track_x)
-
-        ratio = (mouse_x - track_x) / float(track_w)
-        ratio = max(0.0, min(1.0, ratio))
-
-        new_count = int(ratio * self.total_stitches)
-        self.visible_count = new_count
-        self.Refresh()
-
-        if self.on_seek_callback:
-            self.on_seek_callback(new_count)
-
-    def OnLeftDown(self, event):
-        self.is_dragging = True
-        self.CaptureMouse()
-        self.UpdateSeekFromMouse(event.GetX())
-
-    def OnLeftUp(self, event):
-        if self.HasCapture():
-            self.ReleaseMouse()
-        self.is_dragging = False
-
-    def OnMotion(self, event):
-        if self.is_dragging and event.Dragging():
-            self.UpdateSeekFromMouse(event.GetX())
-
-    def OnPaint(self, event):
-        dc = wx.AutoBufferedPaintDC(self)
-        w, h = self.GetClientSize()
-        dc.SetBackground(wx.Brush(wx.Colour(235, 235, 235)))
-        dc.Clear()
-
-        track_x = 15
-        track_y = 12
-        track_h = 16
-        track_w = max(10, w - 2 * track_x)
-
-        dc.SetPen(wx.Pen(wx.Colour(120, 120, 120)))
-        dc.SetBrush(wx.Brush(wx.Colour(200, 200, 200)))
-        dc.DrawRectangle(track_x, track_y, track_w, track_h)
-
-        # Position Knob
-        ratio = self.visible_count / float(self.total_stitches)
-        knob_x = track_x + int(ratio * track_w)
-        dc.SetPen(wx.Pen(wx.Colour(200, 40, 40), 2))
-        dc.DrawLine(knob_x, track_y - 2, knob_x, track_y + track_h + 2)
-
-        dc.DrawText(f"Interactive Seeking (Drag Mouse): Stitch {self.visible_count} / {self.total_stitches}", 15, 34)
 
 class MainFrame(wx.Frame):
     def __init__(self):
-        super().__init__(None, title="PES Viewer - Step 18 (Mouse Seeking)", size=(1000, 700))
-        self.pb = SeekingProgressBar(self, on_seek_callback=self.OnSeek)
+        super().__init__(None, title="PES Viewer - Step 19 (MenuBar Integration)", size=(1000, 700))
+        self.SetupMenuBar()
 
-        sizer = wx.BoxSizer(wx.VERTICAL)
-        sizer.Add(wx.Panel(self), 1, wx.EXPAND)
-        sizer.Add(self.pb, 0, wx.EXPAND)
-        self.SetSizer(sizer)
+        self.panel = wx.Panel(self)
+        self.panel.SetBackgroundColour(wx.Colour(240, 240, 240))
+
+        self.CreateStatusBar()
+        self.SetStatusText("Ready. Load a .pes file via File -> Open")
+
         self.Centre()
         self.Show()
 
-    def OnSeek(self, count):
-        print(f"Seek position updated to: {count}")
+    def SetupMenuBar(self):
+        menubar = wx.MenuBar()
+
+        # File Menu
+        file_menu = wx.Menu()
+        open_item = file_menu.Append(wx.ID_OPEN, "&Open...\tCtrl+O", "Open PES File")
+        file_menu.AppendSeparator()
+        exit_item = file_menu.Append(wx.ID_EXIT, "E&xit\tCtrl+Q", "Exit Application")
+
+        # View Menu
+        view_menu = wx.Menu()
+        fit_item = view_menu.Append(wx.ID_ANY, "&Fit to Screen\tF", "Fit pattern to window")
+        grid_item = view_menu.Append(wx.ID_ANY, "Toggle &Grid\tG", "Toggle millimeter grid")
+
+        # Playback Menu
+        play_menu = wx.Menu()
+        play_item = play_menu.Append(wx.ID_ANY, "&Play / Pause\tSpace", "Toggle playback")
+
+        menubar.Append(file_menu, "&File")
+        menubar.Append(view_menu, "&View")
+        menubar.Append(play_menu, "&Playback")
+
+        self.SetMenuBar(menubar)
+
+        self.Bind(wx.EVT_MENU, self.OnOpen, open_item)
+        self.Bind(wx.EVT_MENU, lambda e: self.Close(), exit_item)
+
+    def OnOpen(self, event):
+        with wx.FileDialog(self, "Open PES File", wildcard="PES files (*.pes)|*.pes",
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if dlg.ShowModal() == wx.ID_OK:
+                path = dlg.GetPath()
+                self.SetStatusText(f"Loaded: {path}")
 
 if __name__ == "__main__":
     app = wx.App()
     MainFrame()
     app.MainLoop()
-
