@@ -31,79 +31,83 @@ def ensure_venv():
 ensure_venv()
 #-------------------------------------------------------------------
 
+
 import wx
 import numpy as np
 import pystitch as emb
 
-class ColorCanvas(wx.Panel):
+class AnimatedCanvas(wx.Panel):
     def __init__(self, parent):
         super().__init__(parent)
         self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
         self.stitches_np = np.zeros((0, 7), dtype=np.float32)
-        self.color_boundaries = [0]
         self.visible_count = 0
 
+        # Playback Timer Setup
+        self.timer = wx.Timer(self)
+        self.play_speed = 5  # Stitches per tick
+        self.play_direction = 1
+
+        self.Bind(wx.EVT_TIMER, self.OnTimerTick, self.timer)
         self.Bind(wx.EVT_PAINT, self.OnPaint)
         self.Bind(wx.EVT_KEY_DOWN, self.OnKeyDown)
         self.SetFocus()
 
-    def jump_color_block(self, direction=1):
-        if not self.color_boundaries:
-            return
-
-        curr = self.visible_count
-        if direction > 0:
-            target = next((b for b in self.color_boundaries if b > curr), self.stitches_np.shape[0])
+    def TogglePlay(self, direction=1, speed=5):
+        if self.timer.IsRunning() and self.play_direction == direction:
+            self.timer.Stop()
+            print("[PLAYBACK] Paused")
         else:
-            target = next((b for b in reversed(self.color_boundaries) if b < curr), 0)
+            self.play_direction = direction
+            self.play_speed = speed
+            self.timer.Start(20)  # ~50 FPS timer interval
+            print(f"[PLAYBACK] Started (Dir: {direction}, Speed: {speed})")
 
-        self.visible_count = target
-        print(f"Jumped to color boundary stitch index: {self.visible_count}")
+    def OnTimerTick(self, event):
+        total = self.stitches_np.shape[0]
+        new_count = self.visible_count + (self.play_direction * self.play_speed)
+
+        if new_count >= total:
+            self.visible_count = total
+            self.timer.Stop()
+        elif new_count <= 0:
+            self.visible_count = 0
+            self.timer.Stop()
+        else:
+            self.visible_count = new_count
+
         self.Refresh()
 
     def OnKeyDown(self, event):
         key = event.GetKeyCode()
-        ctrl_down = event.ControlDown()
-
-        if ctrl_down and key == wx.WXK_RIGHT:
-            self.jump_color_block(1)
-        elif ctrl_down and key == wx.WXK_LEFT:
-            self.jump_color_block(-1)
+        if key == wx.WXK_SPACE:
+            self.TogglePlay(direction=1, speed=5)
+        elif key in (ord('V'), ord('v')):
+            self.TogglePlay(direction=1, speed=25)  # Fast Forward
+        elif key in (ord('C'), ord('c')):
+            self.TogglePlay(direction=-1, speed=10) # Rewind
+        elif key == wx.WXK_ESCAPE:
+            if self.timer.IsRunning():
+                self.timer.Stop()
         else:
             event.Skip()
 
     def OnPaint(self, event):
         dc = wx.PaintDC(self)
         dc.Clear()
-        dc.DrawText(f"Visible Stitches: {self.visible_count} / {self.stitches_np.shape[0]}", 20, 20)
-        dc.DrawText(f"Color Boundaries: {self.color_boundaries}", 20, 40)
-        dc.DrawText("Use Ctrl + Left / Right to jump between color blocks", 20, 60)
+        status = "PLAYING" if self.timer.IsRunning() else "PAUSED"
+        dc.DrawText(f"Status: {status} | Visible: {self.visible_count} / {self.stitches_np.shape[0]}", 20, 20)
+        dc.DrawText("Space: Play/Pause | V: Fast Forward | C: Rewind | Esc: Stop", 20, 40)
 
 class MainFrame(wx.Frame):
     def __init__(self, initial_file=None):
-        super().__init__(None, title="PES Viewer - Step 13 (Color Block Jumps)", size=(1000, 700))
-        self.canvas = ColorCanvas(self)
+        super().__init__(None, title="PES Viewer - Step 14 (Auto-Play Simulator)", size=(1000, 700))
+        self.canvas = AnimatedCanvas(self)
 
         if initial_file and os.path.exists(initial_file):
             pattern = emb.read(initial_file)
-            segs = []
-            boundaries = [0]
-            lx, ly = 0.0, 0.0
-
-            for idx, st in enumerate(pattern.stitches):
-                x, y = st[0]/10.0, st[1]/10.0
-                cmd = st[2] if len(st) > 2 else 0
-
-                # Check for color change command
-                if hasattr(emb, 'COLOR_CHANGE') and cmd == emb.COLOR_CHANGE:
-                    boundaries.append(len(segs))
-
-                segs.append((lx, ly, x, y, 200, 100, 50))
-                lx, ly = x, y
-
+            segs = [(0, 0, st[0]/10.0, st[1]/10.0, 100, 200, 50) for st in pattern.stitches]
             self.canvas.stitches_np = np.array(segs, dtype=np.float32)
-            self.canvas.color_boundaries = boundaries
-            self.canvas.visible_count = len(segs)
 
         self.Centre()
         self.Show()
