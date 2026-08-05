@@ -251,6 +251,7 @@ class ProgressBarPanel(wx.Panel):
         self.Bind(wx.EVT_MOTION, self.OnMotionClick)
 
         self.dragging = False
+        self.drag_moved = False
         self.margin_x = 24
         self.bar_y = 8
         self.bar_h = 14
@@ -258,19 +259,25 @@ class ProgressBarPanel(wx.Panel):
     def OnClick(self, e):
         """Start seeking at the mouse position."""
         self.dragging = True
+        self.drag_moved = False
         self.Seek(e.GetPosition().x)
+        self.viewer.HighlightNeedle()
         self.CaptureMouse()
 
     def OnLeftUp(self, e):
         """Finish a seek operation and release the mouse capture."""
         if self.dragging:
+            self.Seek(e.GetPosition().x)
+            self.viewer.HighlightNeedle()
             if self.HasCapture():
                 self.ReleaseMouse()
             self.dragging = False
+            self.drag_moved = False
 
     def OnMotionClick(self, e):
         """Update the seek position while the left button is dragged."""
         if self.dragging and e.Dragging() and e.LeftIsDown():
+            self.drag_moved = True
             self.Seek(e.GetPosition().x)
 
     def Seek(self, mouse_x):
@@ -441,6 +448,10 @@ class EmbroideryViewerPanel(wx.Panel):
         self.visible_count = 0
         self.step_size = 10
         self.show_grid = True
+        self.show_needle = True
+        self.needle_highlighted = False
+        self.needle_highlight_stage = 0
+        self._needle_highlight_timer = None
         self.stitches_np = np.zeros((0, 7), dtype=np.float32)
         self.bounds = (0, 0, 0, 0)
         self.color_boundaries = []
@@ -660,6 +671,7 @@ class EmbroideryViewerPanel(wx.Panel):
         is_ctrl = e.ControlDown()
         is_shift = e.ShiftDown()
         changed = False
+        highlight_needle = False
         step = 1 if is_alt else self.step_size
         if is_shift and not is_alt and not is_ctrl and key in (
             wx.WXK_RIGHT,
@@ -668,6 +680,7 @@ class EmbroideryViewerPanel(wx.Panel):
             changed = self.JumpToCommand(
                 1 if key == wx.WXK_RIGHT else -1
             )
+            highlight_needle = changed
             if changed and self.is_playing:
                 self.play_timer.Stop()
                 self.is_playing = False
@@ -687,6 +700,7 @@ class EmbroideryViewerPanel(wx.Panel):
                 self.JumpToColor(-1)
                 self._last_dir = -1
             changed = True
+            highlight_needle = True
         elif key == wx.WXK_RIGHT:
             if self.visible_count < total:
                 self.visible_count = min(total, self.visible_count + step)
@@ -752,6 +766,13 @@ class EmbroideryViewerPanel(wx.Panel):
         elif key in (ord("G"), ord("g")):
             self.show_grid = not self.show_grid
             changed = True
+        elif key in (ord("N"), ord("n")):
+            self.show_needle = not self.show_needle
+            if self.show_needle:
+                self.HighlightNeedle()
+            else:
+                self.StopNeedleHighlight()
+            changed = True
         elif key in (ord("H"), ord("h")):
             self.ShowHelp()
             return
@@ -764,6 +785,8 @@ class EmbroideryViewerPanel(wx.Panel):
                 self.is_playing = False
                 return
         if changed:
+            if highlight_needle:
+                self.HighlightNeedle()
             if (
                 self.is_playing
                 and key in (wx.WXK_UP, wx.WXK_DOWN, wx.WXK_HOME, wx.WXK_END)
@@ -803,6 +826,7 @@ class EmbroideryViewerPanel(wx.Panel):
             "  G                Toggle grid\n"
             "  H                Show this help\n"
             "  I                Show viewer settings\n\n"
+            "  N                Toggle needle crosshair\n\n"
             "RENDERING\n"
             "  +/-              Change thread width\n"
             "  [/]              Change dark shading\n"
@@ -828,6 +852,7 @@ class EmbroideryViewerPanel(wx.Panel):
             f"  Zoom: {self.zoom:.3f}\n"
             f"  Pan: {self.pan_x:.1f}, {self.pan_y:.1f} px\n"
             f"  Grid: {'on' if self.show_grid else 'off'}\n"
+            f"  Needle: {'on' if self.show_needle else 'off'}\n"
             f"  Gradient: {'on' if self.zoom > 1.2 else 'off'}\n\n"
             f"Rendering\n"
             f"  Line width: {self.line_width:.1f} mm\n"
@@ -969,6 +994,7 @@ class EmbroideryViewerPanel(wx.Panel):
         dc.Clear()
         if not self.need_redraw and self.cached_bitmap:
             dc.DrawBitmap(self.cached_bitmap, 0, 0)
+            self.DrawNeedleOverlay(dc)
             return
         w, h = self.GetSize()
         if self.stitches_np.shape[0] == 0:
@@ -1009,6 +1035,74 @@ class EmbroideryViewerPanel(wx.Panel):
         self.cached_bitmap = bmp
         self.need_redraw = False
         dc.DrawBitmap(bmp, 0, 0)
+        self.DrawNeedleOverlay(dc)
+
+    def DrawNeedleOverlay(self, dc):
+        """Draw the current needle position above the cached stitch bitmap."""
+        if not self.show_needle or self.stitches_np.shape[0] == 0:
+            return
+        if self.visible_count > 0:
+            stitch = self.stitches_np[self.visible_count - 1]
+            world_x, world_y = stitch[2], stitch[3]
+        else:
+            stitch = self.stitches_np[0]
+            world_x, world_y = stitch[0], stitch[1]
+        needle_x = int(world_x * self.zoom + self.pan_x)
+        needle_y = int(world_y * self.zoom + self.pan_y)
+        if self.needle_highlight_stage == 2:
+            arm, radius, outer_radius = 80, 24, 42
+        elif self.needle_highlight_stage == 1:
+            arm, radius, outer_radius = 48, 16, 28
+        else:
+            arm, radius, outer_radius = 14, 6, 0
+        dc.SetPen(wx.Pen(wx.Colour(10, 10, 10), 8 if outer_radius else 4))
+        dc.DrawLine(needle_x - arm, needle_y, needle_x + arm, needle_y)
+        dc.DrawLine(needle_x, needle_y - arm, needle_x, needle_y + arm)
+        if outer_radius:
+            dc.SetBrush(wx.TRANSPARENT_BRUSH)
+            dc.DrawCircle(needle_x, needle_y, outer_radius)
+        dc.SetPen(wx.Pen(wx.Colour(255, 255, 255), 3 if outer_radius else 2))
+        dc.SetBrush(wx.TRANSPARENT_BRUSH)
+        dc.DrawCircle(needle_x, needle_y, radius)
+        dc.DrawLine(needle_x - arm, needle_y, needle_x + arm, needle_y)
+        dc.DrawLine(needle_x, needle_y - arm, needle_x, needle_y + arm)
+        dc.SetBrush(wx.Brush(wx.Colour(255, 220, 40)))
+        dc.SetPen(wx.Pen(wx.Colour(10, 10, 10), 2))
+        dc.DrawCircle(needle_x, needle_y, 5 if outer_radius else 3)
+
+    def HighlightNeedle(self):
+        """Pulse a large needle marker after user navigation."""
+        if not self.show_needle:
+            return
+        self.needle_highlighted = True
+        self.needle_highlight_stage = 2
+        if self._needle_highlight_timer is not None:
+            self._needle_highlight_timer.Stop()
+        self._needle_highlight_timer = wx.CallLater(
+            200,
+            self._SetNeedleHighlightStage,
+            1,
+        )
+        self.Refresh()
+
+    def _SetNeedleHighlightStage(self, stage):
+        """Advance the temporary needle marker through its visual pulse."""
+        if not self.show_needle:
+            return
+        self.needle_highlight_stage = stage
+        self.Refresh()
+        if stage == 1:
+            self._needle_highlight_timer = wx.CallLater(
+                300,
+                self.StopNeedleHighlight,
+            )
+
+    def StopNeedleHighlight(self):
+        """Return the needle crosshair to its normal size."""
+        self.needle_highlighted = False
+        self.needle_highlight_stage = 0
+        self._needle_highlight_timer = None
+        self.Refresh()
 
     def OnWheel(self, e):
         """Zoom around the mouse position while preserving its world point."""
@@ -1100,7 +1194,6 @@ class Frame(wx.Frame):
         self.viewer = EmbroideryViewerPanel(main_panel, None)
         self.progress = ProgressBarPanel(main_panel, self.viewer)
         self.viewer.progress_bar = self.progress
-        self.progress.Bind(wx.EVT_LEFT_UP, self.viewer.OnLeftUp)
 
         sizer.Add(self.viewer, 1, wx.EXPAND)
         sizer.Add(self.progress, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM,
