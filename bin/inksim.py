@@ -13,6 +13,9 @@ script_dir = Path(__file__).resolve().parent
 # !!! Hardcoded relative path to the virtual environment directory - adjust if you move this script.
 venv_dir = (script_dir / ".." / ".venv").resolve()
 APP_TITLE = "InkSim"
+DENSITY_RADIUS_MM = 2.5
+DENSITY_WARNING_PER_MM2 = 3.0
+DENSITY_CRITICAL_PER_MM2 = 6.0
 AUTO_THREAD_COLORS = (
     (220, 30, 30),
     (30, 100, 220),
@@ -215,6 +218,88 @@ def render_shaded_numba(
                                 buf[yi, xi, 0] = (buf[yi, xi, 0] + r)//2
                                 buf[yi, xi, 1] = (buf[yi, xi, 1] + g)//2
                                 buf[yi, xi, 2] = (buf[yi, xi, 2] + b)//2
+
+
+@numba.njit
+def calculate_stitch_density_numba(points, min_x, min_y, max_x, max_y):
+    """Calculate stitch endpoints per square millimeter in a 5 mm circle."""
+    point_count = points.shape[0]
+    density = np.zeros(point_count, dtype=np.float32)
+    if point_count == 0:
+        return density
+
+    cell_size = 1.0
+    grid_width = max(1, int(np.ceil((max_x - min_x) / cell_size)) + 1)
+    grid_height = max(1, int(np.ceil((max_y - min_y) / cell_size)) + 1)
+    grid = np.zeros((grid_height, grid_width), dtype=np.int32)
+
+    for point_index in range(point_count):
+        cell_x = int((points[point_index, 0] - min_x) / cell_size)
+        cell_y = int((points[point_index, 1] - min_y) / cell_size)
+        cell_x = min(max(cell_x, 0), grid_width - 1)
+        cell_y = min(max(cell_y, 0), grid_height - 1)
+        grid[cell_y, cell_x] += 1
+
+    radius = DENSITY_RADIUS_MM
+    radius_cells = int(np.ceil(radius / cell_size))
+    radius_squared = radius * radius
+    circle_area = np.pi * radius_squared
+    for point_index in range(point_count):
+        cell_x = int((points[point_index, 0] - min_x) / cell_size)
+        cell_y = int((points[point_index, 1] - min_y) / cell_size)
+        count = 0
+        for offset_y in range(-radius_cells, radius_cells + 1):
+            neighbor_y = cell_y + offset_y
+            if neighbor_y < 0 or neighbor_y >= grid_height:
+                continue
+            for offset_x in range(-radius_cells, radius_cells + 1):
+                neighbor_x = cell_x + offset_x
+                if neighbor_x < 0 or neighbor_x >= grid_width:
+                    continue
+                cell_center_x = min_x + (neighbor_x + 0.5) * cell_size
+                cell_center_y = min_y + (neighbor_y + 0.5) * cell_size
+                dx = cell_center_x - points[point_index, 0]
+                dy = cell_center_y - points[point_index, 1]
+                if dx * dx + dy * dy <= radius_squared + 1.0:
+                    count += grid[neighbor_y, neighbor_x]
+        density[point_index] = count / circle_area
+    return density
+
+
+@numba.njit
+def render_density_numba(buf, points, density, visible_count, zoom, pan_x, pan_y):
+    """Render the stitch-density map directly into the RGB buffer."""
+    height, width, _ = buf.shape
+    visible_points = min(visible_count, points.shape[0])
+    for point_index in range(visible_points):
+        density_value = density[point_index]
+        if density_value >= DENSITY_CRITICAL_PER_MM2:
+            r, g, b = 220, 35, 35
+        elif density_value >= DENSITY_WARNING_PER_MM2:
+            r, g, b = 235, 175, 25
+        else:
+            r, g, b = 45, 110, 215
+        screen_x = int(points[point_index, 0] * zoom + pan_x)
+        screen_y = int(points[point_index, 1] * zoom + pan_y)
+        if screen_x < -3 or screen_x >= width + 3:
+            continue
+        if screen_y < -3 or screen_y >= height + 3:
+            continue
+        for offset_y in range(-3, 4):
+            for offset_x in range(-3, 4):
+                if offset_x * offset_x + offset_y * offset_y > 9:
+                    continue
+                pixel_x = screen_x + offset_x
+                pixel_y = screen_y + offset_y
+                if 0 <= pixel_x < width and 0 <= pixel_y < height:
+                    if offset_x * offset_x + offset_y * offset_y <= 1:
+                        buf[pixel_y, pixel_x, 0] = 10
+                        buf[pixel_y, pixel_x, 1] = 10
+                        buf[pixel_y, pixel_x, 2] = 10
+                    else:
+                        buf[pixel_y, pixel_x, 0] = r
+                        buf[pixel_y, pixel_x, 1] = g
+                        buf[pixel_y, pixel_x, 2] = b
 
 
 def get_supported_input_wildcard():
@@ -448,6 +533,8 @@ class EmbroideryViewerPanel(wx.Panel):
         self.visible_count = 0
         self.step_size = 10
         self.show_grid = True
+        self.show_density = False
+        self.show_jumps = False
         self.show_needle = True
         self.needle_highlighted = False
         self.needle_highlight_stage = 0
@@ -457,6 +544,10 @@ class EmbroideryViewerPanel(wx.Panel):
         self.color_boundaries = []
         self.color_count = 0
         self.command_events = {}
+        self.jump_segments = []
+        self.stitch_points_np = np.zeros((0, 2), dtype=np.float32)
+        self.stitch_density_np = np.zeros((0,), dtype=np.float32)
+        self.density_ready = False
         self.cached_bitmap = None
         self.need_redraw = True
         self.progress_bar = progress_bar
@@ -766,6 +857,14 @@ class EmbroideryViewerPanel(wx.Panel):
         elif key in (ord("G"), ord("g")):
             self.show_grid = not self.show_grid
             changed = True
+        elif key in (ord("J"), ord("j")):
+            self.show_jumps = not self.show_jumps
+            changed = True
+        elif key in (ord("X"), ord("x")):
+            self.show_density = not self.show_density
+            if self.show_density and not self.density_ready:
+                self.CalculateStitchDensity()
+            changed = True
         elif key in (ord("N"), ord("n")):
             self.show_needle = not self.show_needle
             if self.show_needle:
@@ -827,6 +926,8 @@ class EmbroideryViewerPanel(wx.Panel):
             "  H                Show this help\n"
             "  I                Show viewer settings\n\n"
             "  N                Toggle needle crosshair\n\n"
+            "  J                Toggle jump paths\n"
+            "  X                Toggle stitch density map\n\n"
             "RENDERING\n"
             "  +/-              Change thread width\n"
             "  [/]              Change dark shading\n"
@@ -852,6 +953,8 @@ class EmbroideryViewerPanel(wx.Panel):
             f"  Zoom: {self.zoom:.3f}\n"
             f"  Pan: {self.pan_x:.1f}, {self.pan_y:.1f} px\n"
             f"  Grid: {'on' if self.show_grid else 'off'}\n"
+            f"  Jump paths: {'on' if self.show_jumps else 'off'}\n"
+            f"  Density map: {'on' if self.show_density else 'off'}\n"
             f"  Needle: {'on' if self.show_needle else 'off'}\n"
             f"  Gradient: {'on' if self.zoom > 1.2 else 'off'}\n\n"
             f"Rendering\n"
@@ -897,6 +1000,11 @@ class EmbroideryViewerPanel(wx.Panel):
         self.color_boundaries = [0]
         self.color_count = 0
         self.command_events = {}
+        self.jump_segments = []
+        self.stitch_points_np = np.zeros((0, 2), dtype=np.float32)
+        self.stitch_density_np = np.zeros((0,), dtype=np.float32)
+        self.density_ready = False
+        jump_run_indices = []
         for st in pattern.stitches:
             x = st[0] / 10.0
             y = st[1] / 10.0
@@ -911,6 +1019,8 @@ class EmbroideryViewerPanel(wx.Panel):
             if hasattr(emb, "JUMP") and cmd == emb.JUMP:
                 event_position = len(segs)
                 self.command_events.setdefault(event_position, []).append("JUMP")
+                self.jump_segments.append([last_x, last_y, x, y, 1, len(segs)])
+                jump_run_indices.append(len(self.jump_segments) - 1)
                 last_x, last_y = x, y
                 continue
             if hasattr(emb, "END") and cmd == emb.END:
@@ -919,6 +1029,9 @@ class EmbroideryViewerPanel(wx.Panel):
                 hasattr(emb, "COLOR_CHANGE") and cmd == emb.COLOR_CHANGE
             )
             if is_color_change:
+                for jump_index in jump_run_indices:
+                    self.jump_segments[jump_index][4] = 0
+                jump_run_indices = []
                 event_position = len(segs)
                 details = []
                 if thread is not None:
@@ -939,6 +1052,9 @@ class EmbroideryViewerPanel(wx.Panel):
                 last_x, last_y = x, y
                 continue
             if hasattr(emb, "TRIM") and cmd == emb.TRIM:
+                for jump_index in jump_run_indices:
+                    self.jump_segments[jump_index][4] = 0
+                jump_run_indices = []
                 event_position = len(segs)
                 self.command_events.setdefault(event_position, []).append("TRIM")
                 continue
@@ -972,6 +1088,7 @@ class EmbroideryViewerPanel(wx.Panel):
             last_x, last_y = x, y
         if segs:
             self.stitches_np = np.array(segs, dtype=np.float32)
+            self.stitch_points_np = self.stitches_np[:, 2:4].copy()
             self.bounds = (min_x, min_y, max_x, max_y)
             self.visible_count = self.stitches_np.shape[0]
             self.color_boundaries = sorted(
@@ -988,12 +1105,29 @@ class EmbroideryViewerPanel(wx.Panel):
         self.SetFocus()
         return True
 
+    def CalculateStitchDensity(self):
+        """Calculate the density map once, on demand, using the Numba kernel."""
+        if self.density_ready or len(self.stitch_points_np) == 0:
+            return
+        min_x, min_y, max_x, max_y = self.bounds
+        self.stitch_density_np = calculate_stitch_density_numba(
+            self.stitch_points_np,
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+        )
+        self.density_ready = True
+        self.need_redraw = True
+        self.Refresh()
+
     def OnPaint(self, e):
         """Render the current viewport, using the cached bitmap when possible."""
         dc = wx.PaintDC(self)
         dc.Clear()
         if not self.need_redraw and self.cached_bitmap:
             dc.DrawBitmap(self.cached_bitmap, 0, 0)
+            self.DrawAnalysisOverlays(dc)
             self.DrawNeedleOverlay(dc)
             return
         w, h = self.GetSize()
@@ -1029,13 +1163,40 @@ class EmbroideryViewerPanel(wx.Panel):
                 self.dark_factor,
                 self.light_factor,
             )
+        if self.show_density and len(self.stitch_points_np) > 0:
+            render_density_numba(
+                buf,
+                self.stitch_points_np,
+                self.stitch_density_np,
+                self.visible_count,
+                self.zoom,
+                self.pan_x,
+                self.pan_y,
+            )
         img = wx.Image(w, h)
         img.SetData(buf.tobytes())
         bmp = wx.Bitmap(img)
         self.cached_bitmap = bmp
         self.need_redraw = False
         dc.DrawBitmap(bmp, 0, 0)
+        self.DrawAnalysisOverlays(dc)
         self.DrawNeedleOverlay(dc)
+
+    def DrawAnalysisOverlays(self, dc):
+        """Draw optional jump paths and local stitch-density diagnostics."""
+        if self.show_jumps:
+            for x1, y1, x2, y2, risky, stitch_index in self.jump_segments:
+                if stitch_index > self.visible_count:
+                    continue
+                color = wx.Colour(220, 45, 45) if risky else wx.Colour(100, 100, 100)
+                dc.SetPen(wx.Pen(color, 2, wx.PENSTYLE_SHORT_DASH))
+                dc.DrawLine(
+                    int(x1 * self.zoom + self.pan_x),
+                    int(y1 * self.zoom + self.pan_y),
+                    int(x2 * self.zoom + self.pan_x),
+                    int(y2 * self.zoom + self.pan_y),
+                )
+
 
     def DrawNeedleOverlay(self, dc):
         """Draw the current needle position above the cached stitch bitmap."""
