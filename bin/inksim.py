@@ -462,6 +462,16 @@ class EmbroideryViewerPanel(wx.Panel):
         zoom_x = (w * 0.8) / bw
         zoom_y = (h * 0.8) / bh
         self.zoom = min(zoom_x, zoom_y)
+        self.CenterDesign()
+
+    def CenterDesign(self):
+        """Center the loaded design without changing its current zoom."""
+        if self.stitches_np.shape[0] == 0:
+            return
+        w, h = self.GetSize()
+        if w < 10 or h < 10:
+            w, h = 1200, 800
+        min_x, min_y, max_x, max_y = self.bounds
         cx = (min_x + max_x) / 2
         cy = (min_y + max_y) / 2
         self.pan_x = w / 2 - cx * self.zoom
@@ -554,8 +564,6 @@ class EmbroideryViewerPanel(wx.Panel):
             wx.WXK_SPACE,
             ord("C"),
             ord("c"),
-            ord("V"),
-            ord("v"),
         )
         if (
             not is_space_or_c
@@ -635,14 +643,13 @@ class EmbroideryViewerPanel(wx.Panel):
                 )
             changed = True
         elif key in (ord("C"), ord("c")):
-            self.ToggleAutoPlay(forward=True)
-            return
-        elif key in (ord("V"), ord("v")):
-            self.ToggleAutoPlay(forward=False)
+            self.CenterDesign()
             return
         elif key in (ord("F"), ord("f")):
-            self.FitToScreen()
-            return
+            frame = wx.GetTopLevelParent(self)
+            if hasattr(frame, "ToggleFullScreen"):
+                frame.ToggleFullScreen()
+                return
         elif key in (ord("G"), ord("g")):
             self.show_grid = not self.show_grid
             changed = True
@@ -674,7 +681,7 @@ class EmbroideryViewerPanel(wx.Panel):
 
     def ShowHelp(self):
         """Show the keyboard and mouse controls used by the viewer."""
-        help_text = f"{APP_TITLE}\n\nMouse: Wheel=Zoom Drag=Pan Click bar=Seek\n\nPlayback:\n  Right/Left - speed up/down while playing\n  Alt+Right/Left - +/- 1 stitch when stopped\n  Ctrl+Right/Left - Next/Prev color\n  Up/Down - Fast seek when stopped\n  Home/End - First/Last\n  Space - Play/Pause toggle\n  C - Forward  V - Backward\n  Esc - Stop\n\nView: +/- width F=fit G=grid H=help\nShading: [ ] - dark factor  Shift+[ ] - light factor\nInfo: I - viewer settings\n"
+        help_text = f"{APP_TITLE}\n\nMouse: Wheel=Zoom Drag=Pan Click bar=Seek\n\nPlayback:\n  Right/Left - speed up/down while playing\n  Alt+Right/Left - +/- 1 stitch when stopped\n  Ctrl+Right/Left - Next/Prev color\n  Up/Down - Fast seek when stopped\n  Home/End - First/Last\n  Space - Play/Pause toggle\n  C - Center design\n  F - Toggle fullscreen\n  Esc - Stop\n\nView: +/- width G=grid H=help\nShading: [ ] - dark factor  Shift+[ ] - light factor\nInfo: I - viewer settings\n"
         dlg = wx.MessageDialog(self, help_text, "Help", wx.OK | wx.ICON_INFORMATION)
         dlg.ShowModal()
         dlg.Destroy()
@@ -885,6 +892,7 @@ class Frame(wx.Frame):
     ):
         """Build the application window and optionally open a design file."""
         super().__init__(None, title=APP_TITLE, size=(1200, 980))
+        self.is_fullscreen = False
 
         # Create the main panel, viewer, and progress bar, and arrange them vertically.
         main_panel = wx.Panel(self)
@@ -904,7 +912,8 @@ class Frame(wx.Frame):
 
         fileMenu = wx.Menu()
         openItem = fileMenu.Append(wx.ID_OPEN, "Open embroidery file\tCtrl+O")
-        fitItem = fileMenu.Append(wx.ID_ANY, "Fit to screen\tF")
+        centerItem = fileMenu.Append(wx.ID_ANY, "Center design\tC")
+        fullscreenItem = fileMenu.Append(wx.ID_ANY, "Fullscreen\tF")
         gridItem = fileMenu.AppendCheckItem(wx.ID_ANY, "Show 1cm grid\tG")
         gridItem.Check(True)
         helpItem = fileMenu.Append(wx.ID_ANY, "Help\tH")
@@ -928,7 +937,8 @@ class Frame(wx.Frame):
         # Bind menu items to their handlers.
         self.Bind(wx.EVT_CLOSE, self.OnClose)
         self.Bind(wx.EVT_MENU, self.OnOpen, openItem)
-        self.Bind(wx.EVT_MENU, lambda e: self.viewer.FitToScreen(), fitItem)
+        self.Bind(wx.EVT_MENU, lambda e: self.viewer.CenterDesign(), centerItem)
+        self.Bind(wx.EVT_MENU, lambda e: self.ToggleFullScreen(), fullscreenItem)
         self.Bind(wx.EVT_MENU, self.OnToggleGrid, gridItem)
         self.Bind(wx.EVT_MENU, lambda e: self.viewer.ShowHelp(), helpItem)
         self.Bind(wx.EVT_MENU, lambda e: self.viewer.SetStepSize(1), s1)
@@ -948,7 +958,7 @@ class Frame(wx.Frame):
         # Set up the status bar with instructions.
         self.CreateStatusBar()
         self.SetStatusText(
-            "Space=play/pause | Ctrl+Arrows=color | Alt+Arrows=1 | F=fit G=grid H=help"
+            "Space=play/pause | C=center | F=fullscreen | Ctrl+Arrows=color | G=grid H=help"
         )
 
         # Center the window, show it, and optionally load a design file.
@@ -960,21 +970,31 @@ class Frame(wx.Frame):
             self.Centre()
         self.Show()
         if fullscreen:
+            self.is_fullscreen = True
             self.ShowFullScreen(True)
-        if (initial_file and os.path.exists(initial_file)
-                and self.viewer.LoadDesign(initial_file, fit_to_screen=True)):
-            if fullscreen:
-                wx.CallAfter(self.viewer.FitToScreen)
+        initial_file_loaded = (
+            initial_file
+            and os.path.exists(initial_file)
+            and self.viewer.LoadDesign(initial_file, fit_to_screen=True)
+        )
+        if initial_file_loaded:
+            self.Hide()
             total = self.viewer.stitches_np.shape[0]
             self.SetTitle(
                 f"{APP_TITLE} - {os.path.basename(initial_file)} - {total} sts"
             )
-            if autoplay:
-                self.viewer.visible_count = 0
-                self.viewer.need_redraw = True
-                self.viewer.Refresh()
-                self.progress.Refresh()
-                self.viewer.ToggleAutoPlay(forward=True)
+            wx.CallLater(100, self._finish_initial_display, autoplay)
+
+    def _finish_initial_display(self, autoplay):
+        """Fit the initial design before showing the ready window."""
+        self.viewer.FitToScreen()
+        self.Show()
+        if autoplay:
+            self.viewer.visible_count = 0
+            self.viewer.need_redraw = True
+            self.viewer.Refresh()
+            self.progress.Refresh()
+            self.viewer.ToggleAutoPlay(forward=True)
 
     def _refresh_after_color_jump(self):
         """Refresh the viewer and timeline after a color-boundary jump."""
@@ -1012,6 +1032,11 @@ class Frame(wx.Frame):
                 )
                 self.progress.Refresh()
         dlg.Destroy()
+
+    def ToggleFullScreen(self):
+        """Toggle undecorated fullscreen without changing the viewport."""
+        self.is_fullscreen = not self.is_fullscreen
+        self.ShowFullScreen(self.is_fullscreen)
 
 
 def _parse_pair(value, name, separator):
