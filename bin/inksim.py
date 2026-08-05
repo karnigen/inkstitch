@@ -350,6 +350,9 @@ class ProgressBarPanel(wx.Panel):
             "JUMP": wx.Colour(100, 100, 100),
             "COLOR CHANGE": wx.Colour(210, 45, 45),
             "TRIM": wx.Colour(230, 140, 20),
+            "STOP": wx.Colour(180, 40, 40),
+            "SLOW": wx.Colour(70, 100, 180),
+            "FAST": wx.Colour(40, 150, 90),
         }
         for stitch_index, commands in self.viewer.command_events.items():
             marker_x = bar_x + int((stitch_index / total) * bar_w)
@@ -827,9 +830,14 @@ class EmbroideryViewerPanel(wx.Panel):
                 continue
             if hasattr(emb, "END") and cmd == emb.END:
                 break
-            if hasattr(emb, "COLOR_CHANGE") and (
-                cmd == emb.COLOR_CHANGE or (cmd & 0x04)
-            ):
+            is_color_change = (
+                hasattr(emb, "COLOR_CHANGE")
+                and (
+                    cmd == emb.COLOR_CHANGE
+                    or (cmd & 0x04 and cmd != getattr(emb, "END", -1))
+                )
+            )
+            if is_color_change:
                 event_position = len(segs)
                 self.command_events.setdefault(event_position, []).append(
                     "COLOR CHANGE"
@@ -842,6 +850,17 @@ class EmbroideryViewerPanel(wx.Panel):
             if hasattr(emb, "TRIM") and cmd == emb.TRIM:
                 event_position = len(segs)
                 self.command_events.setdefault(event_position, []).append("TRIM")
+                continue
+            for command_name in ("STOP", "SLOW", "FAST"):
+                if hasattr(emb, command_name) and cmd == getattr(emb, command_name):
+                    event_position = len(segs)
+                    self.command_events.setdefault(event_position, []).append(
+                        command_name
+                    )
+                    break
+            else:
+                command_name = None
+            if command_name is not None:
                 continue
             if has_thread_colors:
                 color_idx = min(cur_color_idx, len(palette) - 1)
