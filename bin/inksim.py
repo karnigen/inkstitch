@@ -35,100 +35,74 @@ import wx
 import numpy as np
 import pystitch as emb
 
-try:
-    from numba import njit
-    HAS_NUMBA = True
-except ImportError:
-    HAS_NUMBA = False
-    def njit(*args, **kwargs):
-        def decorator(func):
-            return func
-        return decorator
-
-@njit(fastmath=True)
-def render_visible_stitches(buf, stitches, visible_count, width, height, zoom, pan_x, pan_y):
-    """Renders only the first visible_count stitches from the array."""
-    count = min(visible_count, stitches.shape[0])
-    for i in range(count):
-        st = stitches[i]
-        sx0 = int(st[0] * zoom + pan_x)
-        sy0 = int(st[1] * zoom + pan_y)
-        sx1 = int(st[2] * zoom + pan_x)
-        sy1 = int(st[3] * zoom + pan_y)
-
-        # Frustum culling
-        if (sx0 < 0 and sx1 < 0) or (sx0 >= width and sx1 >= width): continue
-        if (sy0 < 0 and sy1 < 0) or (sy0 >= height and sy1 >= height): continue
-
-        r, g, b = int(st[4]), int(st[5]), int(st[6])
-        # Simple line drawing for step 12
-        if 0 <= sx1 < width and 0 <= sy1 < height:
-            buf[sy1, sx1] = [r, g, b]
-
-class StepCanvas(wx.Panel):
+class ColorCanvas(wx.Panel):
     def __init__(self, parent):
         super().__init__(parent)
         self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
         self.stitches_np = np.zeros((0, 7), dtype=np.float32)
+        self.color_boundaries = [0]
         self.visible_count = 0
-        self.zoom = 2.0
-        self.pan_x, self.pan_y = 400.0, 300.0
 
         self.Bind(wx.EVT_PAINT, self.OnPaint)
         self.Bind(wx.EVT_KEY_DOWN, self.OnKeyDown)
         self.SetFocus()
 
-    def set_visible_count(self, count):
-        total = self.stitches_np.shape[0]
-        self.visible_count = max(0, min(total, count))
+    def jump_color_block(self, direction=1):
+        if not self.color_boundaries:
+            return
+
+        curr = self.visible_count
+        if direction > 0:
+            target = next((b for b in self.color_boundaries if b > curr), self.stitches_np.shape[0])
+        else:
+            target = next((b for b in reversed(self.color_boundaries) if b < curr), 0)
+
+        self.visible_count = target
+        print(f"Jumped to color boundary stitch index: {self.visible_count}")
         self.Refresh()
 
     def OnKeyDown(self, event):
         key = event.GetKeyCode()
-        total = self.stitches_np.shape[0]
+        ctrl_down = event.ControlDown()
 
-        if key == wx.WXK_RIGHT:
-            self.set_visible_count(self.visible_count + 1)
-        elif key == wx.WXK_LEFT:
-            self.set_visible_count(self.visible_count - 1)
-        elif key == wx.WXK_UP:
-            self.set_visible_count(self.visible_count + 100)
-        elif key == wx.WXK_DOWN:
-            self.set_visible_count(self.visible_count - 100)
-        elif key == wx.WXK_HOME:
-            self.set_visible_count(0)
-        elif key == wx.WXK_END:
-            self.set_visible_count(total)
+        if ctrl_down and key == wx.WXK_RIGHT:
+            self.jump_color_block(1)
+        elif ctrl_down and key == wx.WXK_LEFT:
+            self.jump_color_block(-1)
         else:
             event.Skip()
 
     def OnPaint(self, event):
         dc = wx.PaintDC(self)
-        w, h = self.GetSize()
-        if w < 1 or h < 1: return
-
-        buf = np.full((h, w, 3), 245, dtype=np.uint8)
-        if self.stitches_np.shape[0] > 0:
-            render_visible_stitches(buf, self.stitches_np, self.visible_count, w, h, self.zoom, self.pan_x, self.pan_y)
-
-        img = wx.Image(w, h)
-        img.SetData(buf.tobytes())
-        dc.DrawBitmap(wx.Bitmap(img), 0, 0)
+        dc.Clear()
+        dc.DrawText(f"Visible Stitches: {self.visible_count} / {self.stitches_np.shape[0]}", 20, 20)
+        dc.DrawText(f"Color Boundaries: {self.color_boundaries}", 20, 40)
+        dc.DrawText("Use Ctrl + Left / Right to jump between color blocks", 20, 60)
 
 class MainFrame(wx.Frame):
     def __init__(self, initial_file=None):
-        super().__init__(None, title="PES Viewer - Step 12 (Visible Count Controls)", size=(1000, 700))
-        self.canvas = StepCanvas(self)
+        super().__init__(None, title="PES Viewer - Step 13 (Color Block Jumps)", size=(1000, 700))
+        self.canvas = ColorCanvas(self)
 
         if initial_file and os.path.exists(initial_file):
             pattern = emb.read(initial_file)
             segs = []
+            boundaries = [0]
             lx, ly = 0.0, 0.0
-            for st in pattern.stitches:
+
+            for idx, st in enumerate(pattern.stitches):
                 x, y = st[0]/10.0, st[1]/10.0
-                segs.append((lx, ly, x, y, 0, 150, 200))
+                cmd = st[2] if len(st) > 2 else 0
+
+                # Check for color change command
+                if hasattr(emb, 'COLOR_CHANGE') and cmd == emb.COLOR_CHANGE:
+                    boundaries.append(len(segs))
+
+                segs.append((lx, ly, x, y, 200, 100, 50))
                 lx, ly = x, y
+
             self.canvas.stitches_np = np.array(segs, dtype=np.float32)
+            self.canvas.color_boundaries = boundaries
             self.canvas.visible_count = len(segs)
 
         self.Centre()
