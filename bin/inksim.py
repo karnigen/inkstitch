@@ -78,10 +78,14 @@ def render_grid_numba(buf, zoom, pan_x, pan_y):
         # Keep minor/major lines subtle using a dotted pattern.
         for y in range(h):
             if is_axis:
-                buf[y, sx, 0] = r; buf[y, sx, 1] = g; buf[y, sx, 2] = b
+                buf[y, sx, 0] = r
+                buf[y, sx, 1] = g
+                buf[y, sx, 2] = b
             else:
                 if y % 3 != 0: continue
-                buf[y, sx, 0] = r; buf[y, sx, 1] = g; buf[y, sx, 2] = b
+                buf[y, sx, 0] = r
+                buf[y, sx, 1] = g
+                buf[y, sx, 2] = b
 
     # Horizontal lines (same logic as vertical).
     for yw in range(y_start, y_end+1, 10):
@@ -96,10 +100,14 @@ def render_grid_numba(buf, zoom, pan_x, pan_y):
 
         for x in range(w):
             if is_axis:
-                buf[sy, x, 0] = r; buf[sy, x, 1] = g; buf[sy, x, 2] = b
+                buf[sy, x, 0] = r
+                buf[sy, x, 1] = g
+                buf[sy, x, 2] = b
             else:
                 if x % 3 != 0: continue
-                buf[sy, x, 0] = r; buf[sy, x, 1] = g; buf[sy, x, 2] = b
+                buf[sy, x, 0] = r
+                buf[sy, x, 1] = g
+                buf[sy, x, 2] = b
 
 @numba.njit
 def render_shaded_numba(
@@ -129,14 +137,17 @@ def render_shaded_numba(
         y2 = stitches[i,3] * zoom + pan_y
 
         # Get base thread color for this segment.
-        r_base = int(stitches[i,4]); g_base = int(stitches[i,5]); b_base = int(stitches[i,6])
+        r_base = int(stitches[i, 4])
+        g_base = int(stitches[i, 5])
+        b_base = int(stitches[i, 6])
 
         # Cheap reject: ignore segments completely far outside the viewport.
         if (x1 < -200 and x2 < -200) or (x1 > w+200 and x2 > w+200): continue
         if (y1 < -200 and y2 < -200) or (y1 > h+200 and y2 > h+200): continue
 
         # Compute the segment length in pixels and sample points along it.
-        dx = x2 - x1; dy = y2 - y1
+        dx = x2 - x1
+        dy = y2 - y1
         length = int(np.sqrt(dx*dx + dy*dy)) + 1
         if length <= 0: continue
 
@@ -152,29 +163,40 @@ def render_shaded_numba(
         steps = max(steps, 1)
         for s in range(steps+1):
             t = s / steps
-            x = x1 + dx*t; y = y1 + dy*t
+            x = x1 + dx * t
+            y = y1 + dy * t
 
             # Optional gradient along the segment to make stitches look less flat.
             if use_gradient:
-                r = int(r_dark + (r_light - r_dark)*t); g = int(g_dark + (g_light - g_dark)*t); b = int(b_dark + (b_light - b_dark)*t)
+                r = int(r_dark + (r_light - r_dark) * t)
+                g = int(g_dark + (g_light - g_dark) * t)
+                b = int(b_dark + (b_light - b_dark) * t)
             else:
-                r = r_base; g = g_base; b = b_base
+                r = r_base
+                g = g_base
+                b = b_base
 
             # Fast path for thin lines (single pixel footprint).
             if lw_int <= 1:
-                xi = int(x); yi = int(y)
+                xi = int(x)
+                yi = int(y)
                 if 0 <= xi < w and 0 <= yi < h:
-                    buf[yi, xi, 0] = r; buf[yi, xi, 1] = g; buf[yi, xi, 2] = b
+                    buf[yi, xi, 0] = r
+                    buf[yi, xi, 1] = g
+                    buf[yi, xi, 2] = b
             else:
                 # Thick lines: draw a disk around each sampled point.
                 # Interior pixels are solid, rim pixels are blended for a softer edge.
                 for oy in range(-lw_int, lw_int+1):
                     for ox in range(-lw_int, lw_int+1):
                         if ox*ox + oy*oy > hw*hw + 1: continue
-                        xi = int(x + ox); yi = int(y + oy)
+                        xi = int(x + ox)
+                        yi = int(y + oy)
                         if 0 <= xi < w and 0 <= yi < h:
                             if ox*ox + oy*oy <= (hw-0.5)*(hw-0.5):
-                                buf[yi, xi, 0] = r; buf[yi, xi, 1] = g; buf[yi, xi, 2] = b
+                                buf[yi, xi, 0] = r
+                                buf[yi, xi, 1] = g
+                                buf[yi, xi, 2] = b
                             else:
                                 buf[yi, xi, 0] = (buf[yi, xi, 0] + r)//2
                                 buf[yi, xi, 1] = (buf[yi, xi, 1] + g)//2
@@ -828,9 +850,12 @@ class EmbroideryViewerPanel(wx.Panel):
     def OnMotion(self,e):
         """Update the viewport offset while the user drags the canvas."""
         if self.drag_start and e.Dragging() and e.LeftIsDown():
-            dx=e.GetPosition()[0]-self.drag_start[0]; dy=e.GetPosition()[1]-self.drag_start[1]
-            self.pan_x,self.pan_y=self.pan_start[0]+dx,self.pan_start[1]+dy
-            self.need_redraw=True; self.Refresh()
+            dx = e.GetPosition()[0] - self.drag_start[0]
+            dy = e.GetPosition()[1] - self.drag_start[1]
+            self.pan_x = self.pan_start[0] + dx
+            self.pan_y = self.pan_start[1] + dy
+            self.need_redraw = True
+            self.Refresh()
 
 
 class Frame(wx.Frame):
