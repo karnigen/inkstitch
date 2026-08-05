@@ -31,57 +31,94 @@ def ensure_venv():
 ensure_venv()
 #-------------------------------------------------------------------
 
-import argparse
-import os
 import wx
+import numpy as np
 
-class ProgressBarPanel(wx.Panel):
+class ProgressBarTimeline(wx.Panel):
     def __init__(self, parent):
         super().__init__(parent, size=(-1, 58))
         self.SetMinSize((-1, 58))
         self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
 
-        self.Bind(wx.EVT_PAINT, self.OnPaint)
-        self.Bind(wx.EVT_SIZE, self.OnSize)
+        self.stitches_np = np.zeros((0, 7), dtype=np.float32)
+        self.color_boundaries = []
+        self.visible_count = 0
 
-    def OnSize(self, event):
+        self.Bind(wx.EVT_PAINT, self.OnPaint)
+
+    def set_data(self, stitches_np, boundaries, visible_count):
+        self.stitches_np = stitches_np
+        self.color_boundaries = boundaries
+        self.visible_count = visible_count
         self.Refresh()
-        event.Skip()
 
     def OnPaint(self, event):
         dc = wx.AutoBufferedPaintDC(self)
         w, h = self.GetClientSize()
-
-        # Draw base panel background
         dc.SetBackground(wx.Brush(wx.Colour(235, 235, 235)))
         dc.Clear()
 
-        # Track bounds
-        track_margin = 15
+        total_stitches = self.stitches_np.shape[0]
+        track_x = 15
         track_y = 12
         track_h = 16
-        track_w = max(10, w - 2 * track_margin)
+        track_w = max(10, w - 2 * track_x)
 
-        # Outer track frame
-        dc.SetPen(wx.Pen(wx.Colour(180, 180, 180), 1))
-        dc.SetBrush(wx.Brush(wx.Colour(210, 210, 210)))
-        dc.DrawRectangle(track_margin, track_y, track_w, track_h)
+        # Draw Color Timeline Segments
+        if total_stitches > 0 and len(self.color_boundaries) > 0:
+            bounds = self.color_boundaries + [total_stitches]
+            for i in range(len(bounds) - 1):
+                idx_start = bounds[i]
+                idx_end = bounds[i + 1]
+                if idx_start >= total_stitches: break
+
+                # Fetch color from first stitch of segment
+                r, g, b = int(self.stitches_np[idx_start, 4]), int(self.stitches_np[idx_start, 5]), int(self.stitches_np[idx_start, 6])
+
+                x1 = track_x + int((idx_start / total_stitches) * track_w)
+                x2 = track_x + int((idx_end / total_stitches) * track_w)
+                seg_w = max(1, x2 - x1)
+
+                dc.SetPen(wx.TRANSPARENT_PEN)
+                dc.SetBrush(wx.Brush(wx.Colour(r, g, b)))
+                dc.DrawRectangle(x1, track_y, seg_w, track_h)
+
+        # Track Border
+        dc.SetPen(wx.Pen(wx.Colour(100, 100, 100), 1))
+        dc.SetBrush(wx.TRANSPARENT_BRUSH)
+        dc.DrawRectangle(track_x, track_y, track_w, track_h)
+
+        # Draw Position Knob
+        if total_stitches > 0:
+            ratio = min(1.0, max(0.0, self.visible_count / total_stitches))
+            knob_x = track_x + int(ratio * track_w)
+
+            # Semi-transparent unstitched overlay
+            dc.SetBrush(wx.Brush(wx.Colour(0, 0, 0, 80)))
+            dc.SetPen(wx.TRANSPARENT_PEN)
+            dc.DrawRectangle(knob_x, track_y, track_x + track_w - knob_x, track_h)
+
+            # Indicator Pin
+            dc.SetPen(wx.Pen(wx.Colour(220, 30, 30), 2))
+            dc.DrawLine(knob_x, track_y - 3, knob_x, track_y + track_h + 3)
 
 class MainFrame(wx.Frame):
     def __init__(self):
-        super().__init__(None, title="PES Viewer - Step 16 (ProgressBar Base)", size=(1000, 700))
+        super().__init__(None, title="PES Viewer - Step 17 (Color Timeline ProgressBar)", size=(1000, 700))
+        self.progress_bar = ProgressBarTimeline(self)
+
+        # Mock stitch data with 3 colors
+        segs = []
+        for i in range(300): segs.append((0,0,1,1, 200, 40, 40))   # Red
+        for i in range(400): segs.append((0,0,1,1, 40, 180, 40))   # Green
+        for i in range(300): segs.append((0,0,1,1, 40, 40, 220))   # Blue
+
+        stitches_np = np.array(segs, dtype=np.float32)
+        self.progress_bar.set_data(stitches_np, [0, 300, 700], 450)
+
         sizer = wx.BoxSizer(wx.VERTICAL)
-
-        # Main Canvas Placeholder
-        self.canvas_placeholder = wx.Panel(self)
-        self.canvas_placeholder.SetBackgroundColour(wx.Colour(245, 245, 245))
-
-        # Bottom Progress Panel
-        self.progress_bar = ProgressBarPanel(self)
-
-        sizer.Add(self.canvas_placeholder, 1, wx.EXPAND)
+        sizer.Add(wx.Panel(self), 1, wx.EXPAND)
         sizer.Add(self.progress_bar, 0, wx.EXPAND)
-
         self.SetSizer(sizer)
         self.Centre()
         self.Show()
