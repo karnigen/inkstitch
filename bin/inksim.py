@@ -393,7 +393,7 @@ class EmbroideryViewerPanel(wx.Panel):
         self.pan_start = (0, 0)
         self.line_width = 2.0
         self.dark_factor = 0.75
-        self.light_factor = 0.85
+        self.light_factor = 0.45
         self.shading_step = 0.05
         self.visible_count = 0
         self.step_size = 10
@@ -646,6 +646,9 @@ class EmbroideryViewerPanel(wx.Panel):
             self.CenterDesign()
             return
         elif key in (ord("F"), ord("f")):
+            self.FitToScreen()
+            return
+        elif key == wx.WXK_F11:
             frame = wx.GetTopLevelParent(self)
             if hasattr(frame, "ToggleFullScreen"):
                 frame.ToggleFullScreen()
@@ -681,7 +684,7 @@ class EmbroideryViewerPanel(wx.Panel):
 
     def ShowHelp(self):
         """Show the keyboard and mouse controls used by the viewer."""
-        help_text = f"{APP_TITLE}\n\nMouse: Wheel=Zoom Drag=Pan Click bar=Seek\n\nPlayback:\n  Right/Left - speed up/down while playing\n  Alt+Right/Left - +/- 1 stitch when stopped\n  Ctrl+Right/Left - Next/Prev color\n  Up/Down - Fast seek when stopped\n  Home/End - First/Last\n  Space - Play/Pause toggle\n  C - Center design\n  F - Toggle fullscreen\n  Esc - Stop\n\nView: +/- width G=grid H=help\nShading: [ ] - dark factor  Shift+[ ] - light factor\nInfo: I - viewer settings\n"
+        help_text = f"{APP_TITLE}\n\nMouse: Wheel=Zoom Drag=Pan Click bar=Seek\n\nPlayback:\n  Right/Left - speed up/down while playing\n  Alt+Right/Left - +/- 1 stitch when stopped\n  Ctrl+Right/Left - Next/Prev color\n  Up/Down - Fast seek when stopped\n  Home/End - First/Last\n  Space - Play/Pause toggle\n  C - Center design\n  F - Fit design to window\n  F11 - Toggle fullscreen\n  Esc - Stop\n\nView: +/- width G=grid H=help\nShading: [ ] - dark factor  Shift+[ ] - light factor\nInfo: I - viewer settings\n"
         dlg = wx.MessageDialog(self, help_text, "Help", wx.OK | wx.ICON_INFORMATION)
         dlg.ShowModal()
         dlg.Destroy()
@@ -937,7 +940,8 @@ class Frame(wx.Frame):
         fileMenu = wx.Menu()
         openItem = fileMenu.Append(wx.ID_OPEN, "Open embroidery file\tCtrl+O")
         centerItem = fileMenu.Append(wx.ID_ANY, "Center design\tC")
-        fullscreenItem = fileMenu.Append(wx.ID_ANY, "Fullscreen\tF")
+        fitItem = fileMenu.Append(wx.ID_ANY, "Fit design to window\tF")
+        fullscreenItem = fileMenu.Append(wx.ID_ANY, "Fullscreen\tF11")
         gridItem = fileMenu.AppendCheckItem(wx.ID_ANY, "Show 1cm grid\tG")
         gridItem.Check(True)
         helpItem = fileMenu.Append(wx.ID_ANY, "Help\tH")
@@ -962,6 +966,7 @@ class Frame(wx.Frame):
         self.Bind(wx.EVT_CLOSE, self.OnClose)
         self.Bind(wx.EVT_MENU, self.OnOpen, openItem)
         self.Bind(wx.EVT_MENU, lambda e: self.viewer.CenterDesign(), centerItem)
+        self.Bind(wx.EVT_MENU, lambda e: self.viewer.FitToScreen(), fitItem)
         self.Bind(wx.EVT_MENU, lambda e: self.ToggleFullScreen(), fullscreenItem)
         self.Bind(wx.EVT_MENU, self.OnToggleGrid, gridItem)
         self.Bind(wx.EVT_MENU, lambda e: self.viewer.ShowHelp(), helpItem)
@@ -982,7 +987,7 @@ class Frame(wx.Frame):
         # Set up the status bar with instructions.
         self.CreateStatusBar()
         self.SetStatusText(
-            "Space=play/pause | C=center | F=fullscreen | Ctrl+Arrows=color | G=grid H=help"
+            "Space=play/pause | C=center | F=fit | F11=fullscreen | Ctrl+Arrows=color | G=grid H=help"
         )
 
         # Window geometry
@@ -992,6 +997,8 @@ class Frame(wx.Frame):
             self.SetPosition(window_position)
         elif not window_size and not fullscreen:
             self.Centre()
+        if not fullscreen and not window_size:
+            self.Maximize(True)
 
         # Load design early with final size already set.
         # Because init_size is already fullscreen size, FitToScreen will be correct on first paint.
@@ -1019,7 +1026,7 @@ class Frame(wx.Frame):
         else:
             if not self.IsShown():
                 self.Show()
-            if initial_file_loaded and autoplay:
+            if initial_file_loaded:
                 wx.CallAfter(self._finish_initial_display, autoplay)
 
     def _finish_initial_display(self, autoplay):
@@ -1027,7 +1034,7 @@ class Frame(wx.Frame):
 
         ``wx.CallAfter`` runs this after the frame and child panels have their
         final sizes.  The fit is intentionally limited to startup; changing
-        fullscreen later with ``F`` preserves the user's current viewport.
+        fullscreen later with ``F11`` preserves the user's current viewport.
         """
         self.Layout()
         self._main_panel.Layout()
