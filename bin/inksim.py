@@ -368,6 +368,9 @@ class ProgressBarPanel(wx.Panel):
         dc.SetTextForeground(wx.Colour(30, 30, 30))
 
         txt_left = f"{vis}/{total} stitches"
+        command = self.viewer.command_events.get(vis, "")
+        if command:
+            txt_left += f" | {command}"
         txt_center = f"{vis / total * 100:.1f}%"
         if hasattr(self.viewer, "bounds") and self.viewer.bounds != (0, 0, 0, 0):
             bw = self.viewer.bounds[2] - self.viewer.bounds[0]
@@ -416,6 +419,7 @@ class EmbroideryViewerPanel(wx.Panel):
         self.bounds = (0, 0, 0, 0)
         self.color_boundaries = []
         self.color_count = 0
+        self.command_events = {}
         self.cached_bitmap = None
         self.need_redraw = True
         self.progress_bar = progress_bar
@@ -763,23 +767,43 @@ class EmbroideryViewerPanel(wx.Panel):
         max_x = max_y = -1e9
         self.color_boundaries = [0]
         self.color_count = 0
+        self.command_events = {}
         for st in pattern.stitches:
             x = st[0] / 10.0
             y = st[1] / 10.0
             cmd = st[2] if len(st) > 2 else 0
             if hasattr(emb, "JUMP") and cmd == emb.JUMP:
+                event_position = len(segs)
+                previous_event = self.command_events.get(event_position)
+                self.command_events[event_position] = (
+                    f"{previous_event} | JUMP" if previous_event else "JUMP"
+                )
                 last_x, last_y = x, y
                 continue
+            if hasattr(emb, "END") and cmd == emb.END:
+                break
             if hasattr(emb, "COLOR_CHANGE") and (
                 cmd == emb.COLOR_CHANGE or (cmd & 0x04)
             ):
+                event_position = len(segs)
+                previous_event = self.command_events.get(event_position)
+                self.command_events[event_position] = (
+                    f"{previous_event} | COLOR CHANGE"
+                    if previous_event
+                    else "COLOR CHANGE"
+                )
                 cur_color_idx += 1
                 if segs:
                     self.color_boundaries.append(len(segs))
                 last_x, last_y = x, y
                 continue
-            if hasattr(emb, "END") and cmd == emb.END:
-                break
+            if hasattr(emb, "TRIM") and cmd == emb.TRIM:
+                event_position = len(segs)
+                previous_event = self.command_events.get(event_position)
+                self.command_events[event_position] = (
+                    f"{previous_event} | TRIM" if previous_event else "TRIM"
+                )
+                continue
             if has_thread_colors:
                 color_idx = min(cur_color_idx, len(palette) - 1)
             else:
