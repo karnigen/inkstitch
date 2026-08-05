@@ -41,15 +41,7 @@ try:
 except ImportError:
     HAS_NUMBA = False
 
-try:
-    import pystitch as emb
-    HAS_EMB = True
-except ImportError:
-    try:
-        import pyembroidery as emb
-        HAS_EMB = True
-    except ImportError:
-        HAS_EMB = False
+import pystitch as emb
 
 if HAS_NUMBA:
     @numba.njit
@@ -422,8 +414,6 @@ class PesViewerFastPanel(wx.Panel):
         dlg.ShowModal(); dlg.Destroy()
     def SetStepSize(self, size): self.step_size = max(1, size)
     def LoadPes(self, path, fit_to_screen=True):
-        if not HAS_EMB:
-            wx.MessageBox("pystitch not installed", "Error"); return False
         try:
             pattern = emb.read(path)
         except Exception as ex:
