@@ -35,100 +35,93 @@ import wx
 import time
 import numpy as np
 
-try:
-    import numba
-    HAS_NUMBA = True
-except ImportError:
-    HAS_NUMBA = False
+import numba
 
 import pystitch as emb
 
-if HAS_NUMBA:
-    @numba.njit
-    def render_grid_numba(buf, zoom, pan_x, pan_y):
-        h, w, _ = buf.shape
-        x_world_min = (-pan_x) / zoom
-        x_world_max = (w - pan_x) / zoom
-        y_world_min = (-pan_y) / zoom
-        y_world_max = (h - pan_y) / zoom
-        x_start = int(np.floor(x_world_min / 10.0) * 10)
-        x_end = int(np.ceil(x_world_max / 10.0) * 10)
-        y_start = int(np.floor(y_world_min / 10.0) * 10)
-        y_end = int(np.ceil(y_world_max / 10.0) * 10)
-        for xw in range(x_start, x_end+1, 10):
-            sx = int(xw * zoom + pan_x)
-            if sx < 0 or sx >= w: continue
-            is_major = (xw % 50 == 0)
-            is_axis = (xw == 0)
-            if is_axis: r,g,b = 200, 100, 100
-            elif is_major: r,g,b = 190, 190, 190
-            else: r,g,b = 230, 230, 230
-            for y in range(h):
-                if is_axis:
-                    buf[y, sx, 0] = r; buf[y, sx, 1] = g; buf[y, sx, 2] = b
-                else:
-                    if y % 3 != 0: continue
-                    buf[y, sx, 0] = r; buf[y, sx, 1] = g; buf[y, sx, 2] = b
-        for yw in range(y_start, y_end+1, 10):
-            sy = int(yw * zoom + pan_y)
-            if sy < 0 or sy >= h: continue
-            is_major = (yw % 50 == 0)
-            is_axis = (yw == 0)
-            if is_axis: r,g,b = 100, 200, 100
-            elif is_major: r,g,b = 190, 190, 190
-            else: r,g,b = 230, 230, 230
-            for x in range(w):
-                if is_axis:
-                    buf[sy, x, 0] = r; buf[sy, x, 1] = g; buf[sy, x, 2] = b
-                else:
-                    if x % 3 != 0: continue
-                    buf[sy, x, 0] = r; buf[sy, x, 1] = g; buf[sy, x, 2] = b
+@numba.njit
+def render_grid_numba(buf, zoom, pan_x, pan_y):
+    h, w, _ = buf.shape
+    x_world_min = (-pan_x) / zoom
+    x_world_max = (w - pan_x) / zoom
+    y_world_min = (-pan_y) / zoom
+    y_world_max = (h - pan_y) / zoom
+    x_start = int(np.floor(x_world_min / 10.0) * 10)
+    x_end = int(np.ceil(x_world_max / 10.0) * 10)
+    y_start = int(np.floor(y_world_min / 10.0) * 10)
+    y_end = int(np.ceil(y_world_max / 10.0) * 10)
+    for xw in range(x_start, x_end+1, 10):
+        sx = int(xw * zoom + pan_x)
+        if sx < 0 or sx >= w: continue
+        is_major = (xw % 50 == 0)
+        is_axis = (xw == 0)
+        if is_axis: r,g,b = 200, 100, 100
+        elif is_major: r,g,b = 190, 190, 190
+        else: r,g,b = 230, 230, 230
+        for y in range(h):
+            if is_axis:
+                buf[y, sx, 0] = r; buf[y, sx, 1] = g; buf[y, sx, 2] = b
+            else:
+                if y % 3 != 0: continue
+                buf[y, sx, 0] = r; buf[y, sx, 1] = g; buf[y, sx, 2] = b
+    for yw in range(y_start, y_end+1, 10):
+        sy = int(yw * zoom + pan_y)
+        if sy < 0 or sy >= h: continue
+        is_major = (yw % 50 == 0)
+        is_axis = (yw == 0)
+        if is_axis: r,g,b = 100, 200, 100
+        elif is_major: r,g,b = 190, 190, 190
+        else: r,g,b = 230, 230, 230
+        for x in range(w):
+            if is_axis:
+                buf[sy, x, 0] = r; buf[sy, x, 1] = g; buf[sy, x, 2] = b
+            else:
+                if x % 3 != 0: continue
+                buf[sy, x, 0] = r; buf[sy, x, 1] = g; buf[sy, x, 2] = b
 
-    @numba.njit
-    def render_shaded_numba(buf, stitches, visible_count, zoom, pan_x, pan_y, use_gradient, line_width):
-        h, w, _ = buf.shape
-        hw = line_width * 0.5
-        lw_int = int(line_width)
-        for i in range(visible_count):
-            x1 = stitches[i,0] * zoom + pan_x
-            y1 = stitches[i,1] * zoom + pan_y
-            x2 = stitches[i,2] * zoom + pan_x
-            y2 = stitches[i,3] * zoom + pan_y
-            r_base = int(stitches[i,4]); g_base = int(stitches[i,5]); b_base = int(stitches[i,6])
-            if (x1 < -200 and x2 < -200) or (x1 > w+200 and x2 > w+200): continue
-            if (y1 < -200 and y2 < -200) or (y1 > h+200 and y2 > h+200): continue
-            dx = x2 - x1; dy = y2 - y1
-            length = int(np.sqrt(dx*dx + dy*dy)) + 1
-            if length <= 0: continue
-            r_dark = int(r_base * 0.35); g_dark = int(g_base * 0.35); b_dark = int(b_base * 0.35)
-            r_light = int(r_base + (255 - r_base)*0.75); g_light = int(g_base + (255 - g_base)*0.75); b_light = int(b_base + (255 - b_base)*0.75)
-            steps = length
-            if steps < 1: steps = 1
-            for s in range(steps+1):
-                t = s / steps
-                x = x1 + dx*t; y = y1 + dy*t
-                if use_gradient:
-                    r = int(r_dark + (r_light - r_dark)*t); g = int(g_dark + (g_light - g_dark)*t); b = int(b_dark + (b_light - b_dark)*t)
-                else:
-                    r = r_base; g = g_base; b = b_base
-                if lw_int <= 1:
-                    xi = int(x); yi = int(y)
-                    if 0 <= xi < w and 0 <= yi < h:
-                        buf[yi, xi, 0] = r; buf[yi, xi, 1] = g; buf[yi, xi, 2] = b
-                else:
-                    for oy in range(-lw_int, lw_int+1):
-                        for ox in range(-lw_int, lw_int+1):
-                            if ox*ox + oy*oy > hw*hw + 1: continue
-                            xi = int(x + ox); yi = int(y + oy)
-                            if 0 <= xi < w and 0 <= yi < h:
-                                if ox*ox + oy*oy <= (hw-0.5)*(hw-0.5):
-                                    buf[yi, xi, 0] = r; buf[yi, xi, 1] = g; buf[yi, xi, 2] = b
-                                else:
-                                    buf[yi, xi, 0] = (buf[yi, xi, 0] + r)//2
-                                    buf[yi, xi, 1] = (buf[yi, xi, 1] + g)//2
-                                    buf[yi, xi, 2] = (buf[yi, xi, 2] + b)//2
-
-
+@numba.njit
+def render_shaded_numba(buf, stitches, visible_count, zoom, pan_x, pan_y, use_gradient, line_width):
+    h, w, _ = buf.shape
+    hw = line_width * 0.5
+    lw_int = int(line_width)
+    for i in range(visible_count):
+        x1 = stitches[i,0] * zoom + pan_x
+        y1 = stitches[i,1] * zoom + pan_y
+        x2 = stitches[i,2] * zoom + pan_x
+        y2 = stitches[i,3] * zoom + pan_y
+        r_base = int(stitches[i,4]); g_base = int(stitches[i,5]); b_base = int(stitches[i,6])
+        if (x1 < -200 and x2 < -200) or (x1 > w+200 and x2 > w+200): continue
+        if (y1 < -200 and y2 < -200) or (y1 > h+200 and y2 > h+200): continue
+        dx = x2 - x1; dy = y2 - y1
+        length = int(np.sqrt(dx*dx + dy*dy)) + 1
+        if length <= 0: continue
+        r_dark = int(r_base * 0.35); g_dark = int(g_base * 0.35); b_dark = int(b_base * 0.35)
+        r_light = int(r_base + (255 - r_base)*0.75); g_light = int(g_base + (255 - g_base)*0.75); b_light = int(b_base + (255 - b_base)*0.75)
+        steps = length
+        if steps < 1: steps = 1
+        for s in range(steps+1):
+            t = s / steps
+            x = x1 + dx*t; y = y1 + dy*t
+            if use_gradient:
+                r = int(r_dark + (r_light - r_dark)*t); g = int(g_dark + (g_light - g_dark)*t); b = int(b_dark + (b_light - b_dark)*t)
+            else:
+                r = r_base; g = g_base; b = b_base
+            if lw_int <= 1:
+                xi = int(x); yi = int(y)
+                if 0 <= xi < w and 0 <= yi < h:
+                    buf[yi, xi, 0] = r; buf[yi, xi, 1] = g; buf[yi, xi, 2] = b
+            else:
+                for oy in range(-lw_int, lw_int+1):
+                    for ox in range(-lw_int, lw_int+1):
+                        if ox*ox + oy*oy > hw*hw + 1: continue
+                        xi = int(x + ox); yi = int(y + oy)
+                        if 0 <= xi < w and 0 <= yi < h:
+                            if ox*ox + oy*oy <= (hw-0.5)*(hw-0.5):
+                                buf[yi, xi, 0] = r; buf[yi, xi, 1] = g; buf[yi, xi, 2] = b
+                            else:
+                                buf[yi, xi, 0] = (buf[yi, xi, 0] + r)//2
+                                buf[yi, xi, 1] = (buf[yi, xi, 1] + g)//2
+                                buf[yi, xi, 2] = (buf[yi, xi, 2] + b)//2
 class ProgressBarPanel(wx.Panel):
     def __init__(self, parent, viewer_panel):
         super().__init__(parent, size=(-1, 58))
@@ -465,11 +458,10 @@ class PesViewerFastPanel(wx.Panel):
             return
         use_gradient = self.zoom > 1.2
         buf = np.full((h,w,3), 255, dtype=np.uint8)
-        if HAS_NUMBA:
-            if self.show_grid:
-                render_grid_numba(buf, self.zoom, self.pan_x, self.pan_y)
-            if self.stitches_np.shape[0]>0 and self.visible_count>0:
-                render_shaded_numba(buf, self.stitches_np, self.visible_count, self.zoom, self.pan_x, self.pan_y, use_gradient, self.line_width)
+        if self.show_grid:
+            render_grid_numba(buf, self.zoom, self.pan_x, self.pan_y)
+        if self.stitches_np.shape[0]>0 and self.visible_count>0:
+            render_shaded_numba(buf, self.stitches_np, self.visible_count, self.zoom, self.pan_x, self.pan_y, use_gradient, self.line_width)
         img = wx.Image(w,h); img.SetData(buf.tobytes()); bmp = wx.Bitmap(img)
         self.cached_bitmap=bmp; self.need_redraw=False; dc.DrawBitmap(bmp,0,0)
     def OnWheel(self,e):
