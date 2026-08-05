@@ -363,7 +363,11 @@ class ProgressBarPanel(wx.Panel):
                     (marker_x - 4, marker_y + 5),
                     (marker_x + 4, marker_y + 5),
                 ]
-                color = command_colors.get(command, wx.Colour(80, 80, 80))
+                color = command_colors.get(command)
+                if color is None and command.startswith("COLOR CHANGE"):
+                    color = command_colors["COLOR CHANGE"]
+                if color is None:
+                    color = wx.Colour(80, 80, 80)
                 dc.SetBrush(wx.Brush(color))
                 dc.SetPen(wx.Pen(color, 1))
                 dc.DrawPolygon(marker)
@@ -822,7 +826,14 @@ class EmbroideryViewerPanel(wx.Panel):
         for st in pattern.stitches:
             x = st[0] / 10.0
             y = st[1] / 10.0
-            cmd = st[2] if len(st) > 2 else 0
+            raw_command = st[2] if len(st) > 2 else emb.STITCH
+            if hasattr(emb, "decode_embroidery_command"):
+                cmd, thread, needle, order = emb.decode_embroidery_command(
+                    raw_command
+                )
+            else:
+                cmd = raw_command
+                thread = needle = order = None
             if hasattr(emb, "JUMP") and cmd == emb.JUMP:
                 event_position = len(segs)
                 self.command_events.setdefault(event_position, []).append("JUMP")
@@ -831,16 +842,22 @@ class EmbroideryViewerPanel(wx.Panel):
             if hasattr(emb, "END") and cmd == emb.END:
                 break
             is_color_change = (
-                hasattr(emb, "COLOR_CHANGE")
-                and (
-                    cmd == emb.COLOR_CHANGE
-                    or (cmd & 0x04 and cmd != getattr(emb, "END", -1))
-                )
+                hasattr(emb, "COLOR_CHANGE") and cmd == emb.COLOR_CHANGE
             )
             if is_color_change:
                 event_position = len(segs)
+                details = []
+                if thread is not None:
+                    details.append(f"T{thread}")
+                if needle is not None:
+                    details.append(f"N{needle}")
+                if order is not None:
+                    details.append(f"O{order}")
+                command_label = "COLOR CHANGE"
+                if details:
+                    command_label += f" ({', '.join(details)})"
                 self.command_events.setdefault(event_position, []).append(
-                    "COLOR CHANGE"
+                    command_label
                 )
                 cur_color_idx += 1
                 if segs:
