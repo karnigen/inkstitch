@@ -901,24 +901,31 @@ class Frame(wx.Frame):
         autoplay=False,
     ):
         """Build the application window and optionally open a design file."""
-        # --- Fix for -f: start with fullscreen size already ---
-        # If fullscreen is requested, create the frame with display size immediately.
-        # This way FitToScreen calculates correct zoom/pan from the first frame,
-        # no flicker and no re-centering later. Works around GTK async ShowFullScreen.
+        # Decide initial size before super().__init__
+        # -f: use display size
+        # default MaxWindow: also use display size so first FitToScreen is already correct
+        # explicit --size: use that size
         init_size = (1200, 980)
-        if fullscreen and not window_size:
+        should_maximize_default = False
+        if not window_size:
             try:
-                # App already exists at this point (created in main)
                 disp = wx.Display(0).GetGeometry()
-                init_size = (disp.GetWidth(), disp.GetHeight())
+                disp_size = (disp.GetWidth(), disp.GetHeight())
+                if fullscreen:
+                    init_size = disp_size
+                else:
+                    # default MaxWindow behavior requested by user
+                    init_size = disp_size
+                    should_maximize_default = True
             except Exception:
                 init_size = (1200, 980)
+                should_maximize_default = not fullscreen
         else:
-            if window_size:
-                init_size = window_size
+            init_size = window_size
 
         super().__init__(None, title=APP_TITLE, size=init_size)
         self.is_fullscreen = False
+        self._should_maximize_default = should_maximize_default
 
         # Create the main panel, viewer, and progress bar, and arrange them vertically.
         main_panel = wx.Panel(self)
@@ -995,17 +1002,14 @@ class Frame(wx.Frame):
             self.SetSize(window_size)
         if window_position:
             self.SetPosition(window_position)
-        elif not window_size and not fullscreen:
+        elif not window_size and not fullscreen and not should_maximize_default:
             self.Centre()
-        if not fullscreen and not window_size:
-            self.Maximize(True)
 
-        # Load design early with final size already set.
-        # Because init_size is already fullscreen size, FitToScreen will be correct on first paint.
+        # Load design with no auto-fit, we will fit explicitly after final size.
         initial_file_loaded = (
             initial_file
             and os.path.exists(initial_file)
-            and self.viewer.LoadDesign(initial_file, fit_to_screen=True)
+            and self.viewer.LoadDesign(initial_file, fit_to_screen=False)
         )
         if initial_file_loaded:
             total = self.viewer.stitches_np.shape[0]
@@ -1015,14 +1019,27 @@ class Frame(wx.Frame):
 
         if fullscreen:
             self.is_fullscreen = True
-            # Show and go fullscreen without decoration.
-            # Since size already matches screen, there is no visible resize.
+            self.Freeze()
             if not self.IsShown():
                 self.Show()
             self.ShowFullScreen(True)
-            # Final fit after fullscreen to account for menu/status bar hiding
-            if initial_file_loaded:
-                wx.CallAfter(self._finish_initial_display, autoplay)
+            self.Layout()
+            self._main_panel.Layout()
+            self.viewer.Layout()
+            wx.CallAfter(self._finish_initial_display, autoplay)
+        elif should_maximize_default:
+            # Default MaxWindow - start maximized but without flicker.
+            # Size is already display size, so first Fit is already almost correct.
+            # Freeze to hide intermediate paint, then Maximize and fit again after GTK event.
+            self.Freeze()
+            if not self.IsShown():
+                self.Show()
+            # On GTK Maximize is async, so we need one more layout pass after it.
+            self.Maximize(True)
+            self.Layout()
+            self._main_panel.Layout()
+            self.viewer.Layout()
+            wx.CallAfter(self._finish_initial_display, autoplay)
         else:
             if not self.IsShown():
                 self.Show()
@@ -1039,7 +1056,10 @@ class Frame(wx.Frame):
         self.Layout()
         self._main_panel.Layout()
         self.viewer.Layout()
+        # Final fit using real client size, not temporary 1200x980
         self.viewer.FitToScreen()
+        if self.IsFrozen():
+            self.Thaw()
         self.viewer.need_redraw = True
         self.viewer.Refresh()
         self.progress.Refresh()
