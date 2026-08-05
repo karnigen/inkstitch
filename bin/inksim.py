@@ -324,19 +324,28 @@ class ProgressBarPanel(wx.Panel):
 
 
 class PesViewerFastPanel(wx.Panel):
+    """Fast interactive PES preview with playback and viewport controls.
+
+    Stitch data is kept in a NumPy array and rendered into a bitmap by the
+    Numba rasterizers above. This panel owns the viewer state: loaded design,
+    current stitch position, zoom and pan, grid visibility, playback, and
+    keyboard/mouse interaction.
+    """
+
     def __init__(self, parent, progress_bar):
+        """Create an empty viewer connected to the progress bar."""
         super().__init__(parent)
         self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
         self.zoom = 1.0
         self.pan_x, self.pan_y = 400, 300
         self.drag_start = None
-        self.pan_start = (0,0)
+        self.pan_start = (0, 0)
         self.line_width = 2.0
         self.visible_count = 0
         self.step_size = 10
         self.show_grid = True
-        self.stitches_np = np.zeros((0,7), dtype=np.float32)
-        self.bounds = (0,0,0,0)
+        self.stitches_np = np.zeros((0, 7), dtype=np.float32)
+        self.bounds = (0, 0, 0, 0)
         self.color_boundaries = []
         self.cached_bitmap = None
         self.need_redraw = True
@@ -359,13 +368,16 @@ class PesViewerFastPanel(wx.Panel):
         self.Bind(wx.EVT_KEY_DOWN, self.OnKeyDown)
         self.Bind(wx.EVT_KEY_UP, self.OnKeyUp)
         self.SetFocus()
+
     def OnSize(self, e):
+        """Invalidate the bitmap and retry deferred initial fitting."""
         self.need_redraw = True
         if self._pending_fit_to_screen and self.stitches_np.shape[0] > 0:
             wx.CallAfter(self._try_fit_to_screen)
         e.Skip()
 
     def _try_fit_to_screen(self, retries=20):
+        """Fit the design once wx has assigned a usable panel size."""
         if not self._pending_fit_to_screen:
             return
         w, h = self.GetSize()
@@ -380,43 +392,69 @@ class PesViewerFastPanel(wx.Panel):
         self.FitToScreen()
 
     def FitToScreen(self):
-        if self.stitches_np.shape[0] == 0: return
+        """Center the loaded design and scale it to fit the viewport."""
+        if self.stitches_np.shape[0] == 0:
+            return
         min_x, min_y, max_x, max_y = self.bounds
-        bw = max_x - min_x; bh = max_y - min_y
-        if bw < 1: bw = 1
-        if bh < 1: bh = 1
-        w,h = self.GetSize()
-        if w < 10 or h < 10: w,h = 1200, 800
-        zoom_x = (w * 0.8) / bw; zoom_y = (h * 0.8) / bh
+        bw = max_x - min_x
+        bh = max_y - min_y
+        bw = max(bw, 1)
+        bh = max(bh, 1)
+        w, h = self.GetSize()
+        if w < 10 or h < 10:
+            w, h = 1200, 800
+        zoom_x = (w * 0.8) / bw
+        zoom_y = (h * 0.8) / bh
         self.zoom = min(zoom_x, zoom_y)
-        cx = (min_x + max_x)/2; cy = (min_y + max_y)/2
-        self.pan_x = w/2 - cx * self.zoom
-        self.pan_y = h/2 - cy * self.zoom
+        cx = (min_x + max_x) / 2
+        cy = (min_y + max_y) / 2
+        self.pan_x = w / 2 - cx * self.zoom
+        self.pan_y = h / 2 - cy * self.zoom
         self.need_redraw = True
         self.Refresh()
-        if self.progress_bar: self.progress_bar.Refresh()
+        if self.progress_bar:
+            self.progress_bar.Refresh()
+
     def OnPlayTimer(self, e):
+        """Advance playback by one timer step in the current direction."""
         total = self.stitches_np.shape[0]
         if total == 0:
-            self.play_timer.Stop(); self.is_playing=False; return
+            self.play_timer.Stop()
+            self.is_playing = False
+            return
         self.visible_count += self.play_step * self._last_dir
         if self.visible_count >= total:
-            self.visible_count = total; self.play_timer.Stop(); self.is_playing=False
+            self.visible_count = total
+            self.play_timer.Stop()
+            self.is_playing = False
         elif self.visible_count <= 0:
-            self.visible_count = 0; self.play_timer.Stop(); self.is_playing=False
-        self.need_redraw = True; self.Refresh()
-        if self.progress_bar: self.progress_bar.Refresh()
+            self.visible_count = 0
+            self.play_timer.Stop()
+            self.is_playing = False
+        self.need_redraw = True
+        self.Refresh()
+        if self.progress_bar:
+            self.progress_bar.Refresh()
+
     def ToggleAutoPlay(self, forward=True):
+        """Start or stop playback, choosing its direction when starting."""
         if self.is_playing:
-            self.play_timer.Stop(); self.is_playing=False
+            self.play_timer.Stop()
+            self.is_playing = False
         else:
             self._last_dir = 1 if forward else -1
-            self.play_timer.Start(self.play_speed); self.is_playing=True
+            self.play_timer.Start(self.play_speed)
+            self.is_playing = True
+
     def OnKeyUp(self, e):
+        """Reset key-repeat throttling after a key is released."""
         self._last_key_time = 0
         e.Skip()
+
     def JumpToColor(self, direction):
-        if not self.color_boundaries: return
+        """Move to the next or previous recorded thread-color boundary."""
+        if not self.color_boundaries:
+            return
         cur = self.visible_count
         if direction > 0:
             for b in self.color_boundaries:
@@ -434,18 +472,30 @@ class PesViewerFastPanel(wx.Panel):
             if cur in self.color_boundaries:
                 idx = self.color_boundaries.index(cur)
                 if idx > 0:
-                    self.visible_count = self.color_boundaries[idx-1]
+                    self.visible_count = self.color_boundaries[idx - 1]
                 else:
                     self.visible_count = 0
             else:
                 self.visible_count = prev
+
     def OnKeyDown(self, e):
+        """Handle playback, navigation, display, and view shortcut keys."""
         now = time.time()
         key = e.GetKeyCode()
-        is_space_or_c = key in (wx.WXK_SPACE, 67, 99, 86, 118)
-        if not is_space_or_c and now - self._last_key_time < self._key_throttle:
-            if not e.AltDown() and not e.ControlDown():
-                return
+        is_space_or_c = key in (
+            wx.WXK_SPACE,
+            ord("C"),
+            ord("c"),
+            ord("V"),
+            ord("v"),
+        )
+        if (
+            not is_space_or_c
+            and now - self._last_key_time < self._key_throttle
+            and not e.AltDown()
+            and not e.ControlDown()
+        ):
+            return
         self._last_key_time = now
         total = self.stitches_np.shape[0]
         is_alt = e.AltDown()
@@ -454,142 +504,240 @@ class PesViewerFastPanel(wx.Panel):
         step = 1 if is_alt else self.step_size
         if is_ctrl and key in (wx.WXK_RIGHT, wx.WXK_LEFT):
             if key == wx.WXK_RIGHT:
-                self.JumpToColor(1); self._last_dir = 1
+                self.JumpToColor(1)
+                self._last_dir = 1
             else:
-                self.JumpToColor(-1); self._last_dir = -1
+                self.JumpToColor(-1)
+                self._last_dir = -1
             changed = True
         elif key == wx.WXK_RIGHT:
             if self.visible_count < total:
                 self.visible_count = min(total, self.visible_count + step)
-                self._last_dir = 1; changed = True
+                self._last_dir = 1
+                changed = True
         elif key == wx.WXK_LEFT:
             if self.visible_count > 0:
                 self.visible_count = max(0, self.visible_count - step)
-                self._last_dir = -1; changed = True
+                self._last_dir = -1
+                changed = True
         elif key == wx.WXK_UP:
             self.visible_count = min(total, self.visible_count + step * 10)
-            self._last_dir = 1; changed = True
+            self._last_dir = 1
+            changed = True
         elif key == wx.WXK_DOWN:
             self.visible_count = max(0, self.visible_count - step * 10)
-            self._last_dir = -1; changed = True
+            self._last_dir = -1
+            changed = True
         elif key == wx.WXK_HOME:
-            self.visible_count = 0; changed = True
+            self.visible_count = 0
+            changed = True
         elif key == wx.WXK_END:
-            self.visible_count = total; changed = True
+            self.visible_count = total
+            changed = True
         elif key == wx.WXK_SPACE:
-            self.ToggleAutoPlay(forward=self._last_dir>0)
+            self.ToggleAutoPlay(forward=self._last_dir > 0)
             return
-        elif key in (43, 61, 388, wx.WXK_NUMPAD_ADD):
-            self.line_width = min(10.0, self.line_width + 0.5); changed = True
-        elif key in (45, 95, 390, wx.WXK_NUMPAD_SUBTRACT):
-            self.line_width = max(0.5, self.line_width - 0.5); changed = True
-        elif key == 67 or key == 99:
+        elif key in (ord("+"), ord("="), wx.WXK_NUMPAD_ADD):
+            self.line_width = min(10.0, self.line_width + 0.5)
+            changed = True
+        elif key in (ord("-"), ord("_"), wx.WXK_NUMPAD_SUBTRACT):
+            self.line_width = max(0.5, self.line_width - 0.5)
+            changed = True
+        elif key in (ord("C"), ord("c")):
             self.ToggleAutoPlay(forward=True)
             return
-        elif key == 86 or key == 118:
+        elif key in (ord("V"), ord("v")):
             self.ToggleAutoPlay(forward=False)
             return
-        elif key == 70 or key == 102:
-            self.FitToScreen(); return
-        elif key == 71 or key == 103:
-            self.show_grid = not self.show_grid; changed = True
-        elif key == 72 or key == 104:
-            self.ShowHelp(); return
+        elif key in (ord("F"), ord("f")):
+            self.FitToScreen()
+            return
+        elif key in (ord("G"), ord("g")):
+            self.show_grid = not self.show_grid
+            changed = True
+        elif key in (ord("H"), ord("h")):
+            self.ShowHelp()
+            return
         elif key == wx.WXK_ESCAPE:
             if self.is_playing:
-                self.play_timer.Stop(); self.is_playing=False
+                self.play_timer.Stop()
+                self.is_playing = False
                 return
         if changed:
-            if self.is_playing and key in (wx.WXK_LEFT, wx.WXK_RIGHT, wx.WXK_UP, wx.WXK_DOWN, wx.WXK_HOME, wx.WXK_END) and not is_ctrl:
-                self.play_timer.Stop(); self.is_playing=False
-            self.need_redraw = True; self.Refresh()
-            if self.progress_bar: self.progress_bar.Refresh()
+            if (
+                self.is_playing
+                and key
+                in (
+                    wx.WXK_LEFT,
+                    wx.WXK_RIGHT,
+                    wx.WXK_UP,
+                    wx.WXK_DOWN,
+                    wx.WXK_HOME,
+                    wx.WXK_END,
+                )
+                and not is_ctrl
+            ):
+                self.play_timer.Stop()
+                self.is_playing = False
+            self.need_redraw = True
+            self.Refresh()
+            if self.progress_bar:
+                self.progress_bar.Refresh()
         else:
             e.Skip()
+
     def ShowHelp(self):
+        """Show the keyboard and mouse controls used by the viewer."""
         help_text = "PES Viewer PRO\n\nMouse: Wheel=Zoom Drag=Pan Click bar=Seek\n\nPlayback:\n  Right/Left - +/- step\n  Alt+Right/Left - +/- 1\n  Ctrl+Right/Left - Next/Prev color\n  Up/Down - Fast\n  Home/End - First/Last\n  Space - Play/Pause toggle\n  C - Forward  V - Backward\n  Esc - Stop\n\nView: +/- width F=fit G=grid H=help\n"
         dlg = wx.MessageDialog(self, help_text, "Help", wx.OK | wx.ICON_INFORMATION)
-        dlg.ShowModal(); dlg.Destroy()
-    def SetStepSize(self, size): self.step_size = max(1, size)
+        dlg.ShowModal()
+        dlg.Destroy()
+
+    def SetStepSize(self, size):
+        self.step_size = max(1, size)
+
     def LoadPes(self, path, fit_to_screen=True):
+        """Load a PES file and convert its stitches to renderable segments."""
         try:
             pattern = emb.read(path)
         except Exception as ex:
-            wx.MessageBox(f"Failed to load PES: {ex}", "Error"); return False
-        segs = []; last_x=last_y=0; cur_color_idx=0
-        palette = pattern.threadlist if hasattr(pattern,'threadlist') and pattern.threadlist else [(220,30,30)]
-        min_x=min_y=1e9; max_x=max_y=-1e9
+            wx.MessageBox(f"Failed to load PES: {ex}", "Error")
+            return False
+        segs = []
+        last_x = last_y = 0
+        cur_color_idx = 0
+        palette = (
+            pattern.threadlist
+            if hasattr(pattern, "threadlist") and pattern.threadlist
+            else [(220, 30, 30)]
+        )
+        min_x = min_y = 1e9
+        max_x = max_y = -1e9
         self.color_boundaries = [0]
         for st in pattern.stitches:
-            x = st[0]/10.0; y = st[1]/10.0; cmd = st[2] if len(st)>2 else 0
-            if hasattr(emb,'JUMP') and cmd == emb.JUMP:
-                last_x,last_y=x,y; continue
-            if hasattr(emb,'COLOR_CHANGE') and (cmd == emb.COLOR_CHANGE or (cmd & 0x04)):
-                cur_color_idx+=1
+            x = st[0] / 10.0
+            y = st[1] / 10.0
+            cmd = st[2] if len(st) > 2 else 0
+            if hasattr(emb, "JUMP") and cmd == emb.JUMP:
+                last_x, last_y = x, y
+                continue
+            if hasattr(emb, "COLOR_CHANGE") and (
+                cmd == emb.COLOR_CHANGE or (cmd & 0x04)
+            ):
+                cur_color_idx += 1
                 if segs:
                     self.color_boundaries.append(len(segs))
-                last_x,last_y=x,y; continue
-            if hasattr(emb,'END') and cmd == emb.END: break
+                last_x, last_y = x, y
+                continue
+            if hasattr(emb, "END") and cmd == emb.END:
+                break
             if cur_color_idx < len(palette):
                 col = palette[cur_color_idx]
-                if hasattr(col,'get_red'): rgb=(col.get_red(), col.get_green(), col.get_blue())
-                elif isinstance(col,(list,tuple)): rgb=tuple(col[:3])
-                else: rgb=(220,30,30)
-            else: rgb=(220,30,30)
-            segs.append((last_x,last_y,x,y,rgb[0],rgb[1],rgb[2]))
-            min_x=min(min_x,last_x,x); min_y=min(min_y,last_y,y)
-            max_x=max(max_x,last_x,x); max_y=max(max_y,last_y,y)
-            last_x,last_y=x,y
+                if hasattr(col, "get_red"):
+                    rgb = (col.get_red(), col.get_green(), col.get_blue())
+                elif isinstance(col, (list, tuple)):
+                    rgb = tuple(col[:3])
+                else:
+                    rgb = (220, 30, 30)
+            else:
+                rgb = (220, 30, 30)
+            segs.append((last_x, last_y, x, y, rgb[0], rgb[1], rgb[2]))
+            min_x = min(min_x, last_x, x)
+            min_y = min(min_y, last_y, y)
+            max_x = max(max_x, last_x, x)
+            max_y = max(max_y, last_y, y)
+            last_x, last_y = x, y
         if segs:
             self.stitches_np = np.array(segs, dtype=np.float32)
-            self.bounds=(min_x,min_y,max_x,max_y)
-            self.visible_count=self.stitches_np.shape[0]
+            self.bounds = (min_x, min_y, max_x, max_y)
+            self.visible_count = self.stitches_np.shape[0]
             self.color_boundaries = sorted(set(self.color_boundaries))
             if fit_to_screen:
                 self._pending_fit_to_screen = True
                 wx.CallAfter(self._try_fit_to_screen)
-        self.need_redraw=True; self.Refresh()
-        if self.progress_bar: self.progress_bar.Refresh()
+        self.need_redraw = True
+        self.Refresh()
+        if self.progress_bar:
+            self.progress_bar.Refresh()
         self.SetFocus()
         return True
+
     def OnPaint(self, e):
-        dc = wx.PaintDC(self); dc.Clear()
+        """Render the current viewport, using the cached bitmap when possible."""
+        dc = wx.PaintDC(self)
+        dc.Clear()
         if not self.need_redraw and self.cached_bitmap:
-            dc.DrawBitmap(self.cached_bitmap,0,0); return
-        w,h = self.GetSize()
-        if self.stitches_np.shape[0]==0:
-            dc.SetFont(wx.Font(14, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
-            dc.DrawText("Open .PES via File > Open or pass as cmd arg",20,20)
-            dc.DrawText("H=help, Space=play/pause, Ctrl+Arrows=color, Alt+Arrows=1",20,45)
+            dc.DrawBitmap(self.cached_bitmap, 0, 0)
+            return
+        w, h = self.GetSize()
+        if self.stitches_np.shape[0] == 0:
+            dc.SetFont(
+                wx.Font(
+                    14, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL
+                )
+            )
+            dc.DrawText("Open .PES via File > Open or pass as cmd arg", 20, 20)
+            dc.DrawText(
+                "H=help, Space=play/pause, Ctrl+Arrows=color, Alt+Arrows=1", 20, 45
+            )
             return
         use_gradient = self.zoom > 1.2
-        buf = np.full((h,w,3), 255, dtype=np.uint8)
+        buf = np.full((h, w, 3), 255, dtype=np.uint8)
         if self.show_grid:
             render_grid_numba(buf, self.zoom, self.pan_x, self.pan_y)
-        if self.stitches_np.shape[0]>0 and self.visible_count>0:
-            render_shaded_numba(buf, self.stitches_np, self.visible_count, self.zoom, self.pan_x, self.pan_y, use_gradient, self.line_width)
-        img = wx.Image(w,h); img.SetData(buf.tobytes()); bmp = wx.Bitmap(img)
-        self.cached_bitmap=bmp; self.need_redraw=False; dc.DrawBitmap(bmp,0,0)
-    def OnWheel(self,e):
-        mx,my=e.GetPosition(); old=self.zoom
-        self.zoom*=1.15 if e.GetWheelRotation()>0 else 1/1.15
-        self.zoom=max(0.05,min(50.0,self.zoom))
-        scale=self.zoom/old
-        self.pan_x=mx-scale*(mx-self.pan_x); self.pan_y=my-scale*(my-self.pan_y)
-        self.need_redraw=True; self.Refresh()
-    def OnLeftDown(self,e):
-        self.drag_start=e.GetPosition(); self.pan_start=(self.pan_x,self.pan_y); self.CaptureMouse(); self.SetFocus()
-    def OnLeftUp(self,e):
-        if self.HasCapture(): self.ReleaseMouse()
-        self.drag_start=None
+        if self.stitches_np.shape[0] > 0 and self.visible_count > 0:
+            render_shaded_numba(
+                buf,
+                self.stitches_np,
+                self.visible_count,
+                self.zoom,
+                self.pan_x,
+                self.pan_y,
+                use_gradient,
+                self.line_width,
+            )
+        img = wx.Image(w, h)
+        img.SetData(buf.tobytes())
+        bmp = wx.Bitmap(img)
+        self.cached_bitmap = bmp
+        self.need_redraw = False
+        dc.DrawBitmap(bmp, 0, 0)
+
+    def OnWheel(self, e):
+        """Zoom around the mouse position while preserving its world point."""
+        mx, my = e.GetPosition()
+        old = self.zoom
+        self.zoom *= 1.15 if e.GetWheelRotation() > 0 else 1 / 1.15
+        self.zoom = max(0.05, min(50.0, self.zoom))
+        scale = self.zoom / old
+        self.pan_x = mx - scale * (mx - self.pan_x)
+        self.pan_y = my - scale * (my - self.pan_y)
+        self.need_redraw = True
+        self.Refresh()
+
+    def OnLeftDown(self, e):
+        """Start panning from the current mouse position."""
+        self.drag_start = e.GetPosition()
+        self.pan_start = (self.pan_x, self.pan_y)
+        self.CaptureMouse()
+        self.SetFocus()
+
+    def OnLeftUp(self, e):
+        """Stop panning and clean up any progress-bar mouse capture."""
+        if self.HasCapture():
+            self.ReleaseMouse()
+        self.drag_start = None
         if self.progress_bar and self.progress_bar.dragging:
             self.progress_bar.dragging=False
             if self.progress_bar.HasCapture(): self.progress_bar.ReleaseMouse()
+
     def OnMotion(self,e):
+        """Update the viewport offset while the user drags the canvas."""
         if self.drag_start and e.Dragging() and e.LeftIsDown():
             dx=e.GetPosition()[0]-self.drag_start[0]; dy=e.GetPosition()[1]-self.drag_start[1]
             self.pan_x,self.pan_y=self.pan_start[0]+dx,self.pan_start[1]+dy
             self.need_redraw=True; self.Refresh()
+
 
 class Frame(wx.Frame):
     def __init__(self, initial_file=None):
