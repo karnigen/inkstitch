@@ -13,6 +13,16 @@ script_dir = Path(__file__).resolve().parent
 # !!! Hardcoded relative path to the virtual environment directory - adjust if you move this script.
 venv_dir = (script_dir / ".." / ".venv").resolve()
 APP_TITLE = "InkSim"
+AUTO_THREAD_COLORS = (
+    (220, 30, 30),
+    (30, 100, 220),
+    (30, 160, 80),
+    (230, 150, 25),
+    (150, 60, 180),
+    (20, 170, 180),
+    (220, 70, 140),
+    (110, 110, 110),
+)
 
 def ensure_venv():
     # print(f"{sys.prefix=}"); print(f"{sys.base_prefix=}")
@@ -363,7 +373,7 @@ class ProgressBarPanel(wx.Panel):
             bh = self.viewer.bounds[3] - self.viewer.bounds[1]
             txt_right = (
                 f"{bw:.1f} x {bh:.1f} mm | "
-                f"{len(self.viewer.color_boundaries)} colors"
+                f"{self.viewer.color_count} color sections"
             )
         else:
             txt_right = ""
@@ -404,6 +414,7 @@ class EmbroideryViewerPanel(wx.Panel):
         self.stitches_np = np.zeros((0, 7), dtype=np.float32)
         self.bounds = (0, 0, 0, 0)
         self.color_boundaries = []
+        self.color_count = 0
         self.cached_bitmap = None
         self.need_redraw = True
         self.progress_bar = progress_bar
@@ -702,7 +713,7 @@ class EmbroideryViewerPanel(wx.Panel):
             f"{APP_TITLE} viewer settings\n\n"
             f"Design\n"
             f"  Stitches: {self.visible_count}/{total}\n"
-            f"  Colors: {len(self.color_boundaries)} boundaries\n"
+            f"  Color sections: {self.color_count}\n"
             f"  Bounds: {width:.1f} x {height:.1f} mm\n\n"
             f"Viewport\n"
             f"  Zoom: {self.zoom:.3f}\n"
@@ -743,14 +754,14 @@ class EmbroideryViewerPanel(wx.Panel):
         segs = []
         last_x = last_y = 0
         cur_color_idx = 0
-        palette = (
-            pattern.threadlist
-            if hasattr(pattern, "threadlist") and pattern.threadlist
-            else [(220, 30, 30)]
+        has_thread_colors = bool(
+            hasattr(pattern, "threadlist") and pattern.threadlist
         )
+        palette = pattern.threadlist if has_thread_colors else AUTO_THREAD_COLORS
         min_x = min_y = 1e9
         max_x = max_y = -1e9
         self.color_boundaries = [0]
+        self.color_count = 0
         for st in pattern.stitches:
             x = st[0] / 10.0
             y = st[1] / 10.0
@@ -768,16 +779,17 @@ class EmbroideryViewerPanel(wx.Panel):
                 continue
             if hasattr(emb, "END") and cmd == emb.END:
                 break
-            if cur_color_idx < len(palette):
-                col = palette[cur_color_idx]
-                if hasattr(col, "get_red"):
-                    rgb = (col.get_red(), col.get_green(), col.get_blue())
-                elif isinstance(col, (list, tuple)):
-                    rgb = tuple(col[:3])
-                else:
-                    rgb = (220, 30, 30)
+            if has_thread_colors:
+                color_idx = min(cur_color_idx, len(palette) - 1)
             else:
-                rgb = (220, 30, 30)
+                color_idx = cur_color_idx % len(AUTO_THREAD_COLORS)
+            col = palette[color_idx]
+            if hasattr(col, "get_red"):
+                rgb = (col.get_red(), col.get_green(), col.get_blue())
+            elif isinstance(col, (list, tuple)):
+                rgb = tuple(col[:3])
+            else:
+                rgb = AUTO_THREAD_COLORS[color_idx % len(AUTO_THREAD_COLORS)]
             segs.append((last_x, last_y, x, y, rgb[0], rgb[1], rgb[2]))
             min_x = min(min_x, last_x, x)
             min_y = min(min_y, last_y, y)
@@ -788,7 +800,10 @@ class EmbroideryViewerPanel(wx.Panel):
             self.stitches_np = np.array(segs, dtype=np.float32)
             self.bounds = (min_x, min_y, max_x, max_y)
             self.visible_count = self.stitches_np.shape[0]
-            self.color_boundaries = sorted(set(self.color_boundaries))
+            self.color_boundaries = sorted(
+                set(boundary for boundary in self.color_boundaries if boundary < len(segs))
+            )
+            self.color_count = len(self.color_boundaries)
             if fit_to_screen:
                 self._pending_fit_to_screen = True
                 wx.CallAfter(self._try_fit_to_screen)
