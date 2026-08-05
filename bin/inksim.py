@@ -31,83 +31,66 @@ def ensure_venv():
 ensure_venv()
 #-------------------------------------------------------------------
 
-
+import time
 import wx
 import numpy as np
 import pystitch as emb
 
-class AnimatedCanvas(wx.Panel):
+class ThrottledCanvas(wx.Panel):
     def __init__(self, parent):
         super().__init__(parent)
         self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
         self.stitches_np = np.zeros((0, 7), dtype=np.float32)
         self.visible_count = 0
 
-        # Playback Timer Setup
-        self.timer = wx.Timer(self)
-        self.play_speed = 5  # Stitches per tick
-        self.play_direction = 1
+        # Throttling parameters
+        self._last_key_time = 0.0
+        self._key_throttle_interval = 0.015  # Limit key events to max ~60 Hz
 
-        self.Bind(wx.EVT_TIMER, self.OnTimerTick, self.timer)
         self.Bind(wx.EVT_PAINT, self.OnPaint)
         self.Bind(wx.EVT_KEY_DOWN, self.OnKeyDown)
         self.SetFocus()
 
-    def TogglePlay(self, direction=1, speed=5):
-        if self.timer.IsRunning() and self.play_direction == direction:
-            self.timer.Stop()
-            print("[PLAYBACK] Paused")
-        else:
-            self.play_direction = direction
-            self.play_speed = speed
-            self.timer.Start(20)  # ~50 FPS timer interval
-            print(f"[PLAYBACK] Started (Dir: {direction}, Speed: {speed})")
-
-    def OnTimerTick(self, event):
-        total = self.stitches_np.shape[0]
-        new_count = self.visible_count + (self.play_direction * self.play_speed)
-
-        if new_count >= total:
-            self.visible_count = total
-            self.timer.Stop()
-        elif new_count <= 0:
-            self.visible_count = 0
-            self.timer.Stop()
-        else:
-            self.visible_count = new_count
-
-        self.Refresh()
-
     def OnKeyDown(self, event):
+        now = time.time()
+        # Suppress event if arriving faster than throttling interval
+        if (now - self._last_key_time) < self._key_throttle_interval:
+            return
+
+        self._last_key_time = now
         key = event.GetKeyCode()
-        if key == wx.WXK_SPACE:
-            self.TogglePlay(direction=1, speed=5)
-        elif key in (ord('V'), ord('v')):
-            self.TogglePlay(direction=1, speed=25)  # Fast Forward
-        elif key in (ord('C'), ord('c')):
-            self.TogglePlay(direction=-1, speed=10) # Rewind
-        elif key == wx.WXK_ESCAPE:
-            if self.timer.IsRunning():
-                self.timer.Stop()
+        total = self.stitches_np.shape[0]
+
+        if key == wx.WXK_RIGHT:
+            self.visible_count = min(total, self.visible_count + 1)
+        elif key == wx.WXK_LEFT:
+            self.visible_count = max(0, self.visible_count - 1)
+        elif key == wx.WXK_UP:
+            self.visible_count = min(total, self.visible_count + 100)
+        elif key == wx.WXK_DOWN:
+            self.visible_count = max(0, self.visible_count - 100)
         else:
             event.Skip()
+            return
+
+        self.Refresh()
 
     def OnPaint(self, event):
         dc = wx.PaintDC(self)
         dc.Clear()
-        status = "PLAYING" if self.timer.IsRunning() else "PAUSED"
-        dc.DrawText(f"Status: {status} | Visible: {self.visible_count} / {self.stitches_np.shape[0]}", 20, 20)
-        dc.DrawText("Space: Play/Pause | V: Fast Forward | C: Rewind | Esc: Stop", 20, 40)
+        dc.DrawText(f"Throttled Input Active | Stitches: {self.visible_count} / {self.stitches_np.shape[0]}", 20, 20)
+        dc.DrawText("Hold Left/Right/Up/Down arrows (Events throttled to ~60 FPS max)", 20, 40)
 
 class MainFrame(wx.Frame):
     def __init__(self, initial_file=None):
-        super().__init__(None, title="PES Viewer - Step 14 (Auto-Play Simulator)", size=(1000, 700))
-        self.canvas = AnimatedCanvas(self)
+        super().__init__(None, title="PES Viewer - Step 15 (Input Throttling)", size=(1000, 700))
+        self.canvas = ThrottledCanvas(self)
 
         if initial_file and os.path.exists(initial_file):
             pattern = emb.read(initial_file)
-            segs = [(0, 0, st[0]/10.0, st[1]/10.0, 100, 200, 50) for st in pattern.stitches]
+            segs = [(0, 0, st[0]/10.0, st[1]/10.0, 50, 100, 200) for st in pattern.stitches]
             self.canvas.stitches_np = np.array(segs, dtype=np.float32)
+            self.canvas.visible_count = len(segs)
 
         self.Centre()
         self.Show()
