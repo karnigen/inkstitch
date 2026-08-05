@@ -880,7 +880,14 @@ class EmbroideryViewerPanel(wx.Panel):
 
 
 class Frame(wx.Frame):
-    """Main InkSim window coordinating the viewer and playback controls."""
+    """Main InkSim window coordinating the viewer and playback controls.
+
+    The initial design is loaded before the frame is shown.  Fullscreen
+    startup also gives the frame the display size before loading the design,
+    then performs one final fit after wx has completed the layout.  This avoids
+    showing an incorrectly positioned design while GTK applies fullscreen
+    geometry asynchronously.
+    """
 
     def __init__(
         self,
@@ -891,7 +898,23 @@ class Frame(wx.Frame):
         autoplay=False,
     ):
         """Build the application window and optionally open a design file."""
-        super().__init__(None, title=APP_TITLE, size=(1200, 980))
+        # --- Fix for -f: start with fullscreen size already ---
+        # If fullscreen is requested, create the frame with display size immediately.
+        # This way FitToScreen calculates correct zoom/pan from the first frame,
+        # no flicker and no re-centering later. Works around GTK async ShowFullScreen.
+        init_size = (1200, 980)
+        if fullscreen and not window_size:
+            try:
+                # App already exists at this point (created in main)
+                disp = wx.Display(0).GetGeometry()
+                init_size = (disp.GetWidth(), disp.GetHeight())
+            except Exception:
+                init_size = (1200, 980)
+        else:
+            if window_size:
+                init_size = window_size
+
+        super().__init__(None, title=APP_TITLE, size=init_size)
         self.is_fullscreen = False
 
         # Create the main panel, viewer, and progress bar, and arrange them vertically.
@@ -906,6 +929,7 @@ class Frame(wx.Frame):
         sizer.Add(self.progress, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM,
                   6)
         main_panel.SetSizer(sizer)
+        self._main_panel = main_panel
 
         # Build the menu bar with file and playback options, and bind them to handlers.
         menubar = wx.MenuBar()
@@ -961,34 +985,57 @@ class Frame(wx.Frame):
             "Space=play/pause | C=center | F=fullscreen | Ctrl+Arrows=color | G=grid H=help"
         )
 
-        # Center the window, show it, and optionally load a design file.
+        # Window geometry
         if window_size:
             self.SetSize(window_size)
         if window_position:
             self.SetPosition(window_position)
-        elif not window_size:
+        elif not window_size and not fullscreen:
             self.Centre()
-        self.Show()
-        if fullscreen:
-            self.is_fullscreen = True
-            self.ShowFullScreen(True)
+
+        # Load design early with final size already set.
+        # Because init_size is already fullscreen size, FitToScreen will be correct on first paint.
         initial_file_loaded = (
             initial_file
             and os.path.exists(initial_file)
             and self.viewer.LoadDesign(initial_file, fit_to_screen=True)
         )
         if initial_file_loaded:
-            self.Hide()
             total = self.viewer.stitches_np.shape[0]
             self.SetTitle(
                 f"{APP_TITLE} - {os.path.basename(initial_file)} - {total} sts"
             )
-            wx.CallLater(100, self._finish_initial_display, autoplay)
+
+        if fullscreen:
+            self.is_fullscreen = True
+            # Show and go fullscreen without decoration.
+            # Since size already matches screen, there is no visible resize.
+            if not self.IsShown():
+                self.Show()
+            self.ShowFullScreen(True)
+            # Final fit after fullscreen to account for menu/status bar hiding
+            if initial_file_loaded:
+                wx.CallAfter(self._finish_initial_display, autoplay)
+        else:
+            if not self.IsShown():
+                self.Show()
+            if initial_file_loaded and autoplay:
+                wx.CallAfter(self._finish_initial_display, autoplay)
 
     def _finish_initial_display(self, autoplay):
-        """Fit the initial design before showing the ready window."""
+        """Finish the one-time startup layout before playback begins.
+
+        ``wx.CallAfter`` runs this after the frame and child panels have their
+        final sizes.  The fit is intentionally limited to startup; changing
+        fullscreen later with ``F`` preserves the user's current viewport.
+        """
+        self.Layout()
+        self._main_panel.Layout()
+        self.viewer.Layout()
         self.viewer.FitToScreen()
-        self.Show()
+        self.viewer.need_redraw = True
+        self.viewer.Refresh()
+        self.progress.Refresh()
         if autoplay:
             self.viewer.visible_count = 0
             self.viewer.need_redraw = True
