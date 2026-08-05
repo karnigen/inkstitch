@@ -780,7 +780,34 @@ class EmbroideryViewerPanel(wx.Panel):
 
     def ShowHelp(self):
         """Show the keyboard and mouse controls used by the viewer."""
-        help_text = f"{APP_TITLE}\n\nMouse: Wheel=Zoom Drag=Pan Click bar=Seek\n\nPlayback:\n  Right/Left - speed up/down while playing\n  Alt+Right/Left - +/- 1 stitch when stopped\n  Shift+Right/Left - Next/Prev command\n  Ctrl+Right/Left - Next/Prev color\n  Up/Down - Fast seek when stopped\n  Home/End - First/Last\n  Space - Play/Pause toggle\n  C - Center design\n  F - Fit design to window\n  F11 - Toggle fullscreen\n  1 - Show design at physical 1:1 size\n  Esc - Stop\n\nView: +/- width G=grid H=help\nShading: [ ] - dark factor  Shift+[ ] - light factor\nInfo: I - viewer settings\n"
+        help_header = f"{APP_TITLE}\n{'=' * len(APP_TITLE)}\n\n"
+        help_text = help_header + (
+            "MOUSE\n"
+            "  Wheel       Zoom\n"
+            "  Drag        Pan\n"
+            "  Click bar   Seek\n\n"
+            "PLAYBACK\n"
+            "  Right/Left       Speed up/down while playing\n"
+            "  Alt+Right/Left   Move by one stitch when stopped\n"
+            "  Shift+Right/Left Next/previous command\n"
+            "  Ctrl+Right/Left  Next/previous color\n"
+            "  Up/Down          Fast seek when stopped\n"
+            "  Home/End         First/last stitch\n"
+            "  Space            Play/pause\n"
+            "  Esc              Stop\n\n"
+            "VIEW\n"
+            "  C                Center design\n"
+            "  F                Fit design to window\n"
+            "  F11              Toggle fullscreen\n"
+            "  1                Show design at physical 1:1 size\n"
+            "  G                Toggle grid\n"
+            "  H                Show this help\n"
+            "  I                Show viewer settings\n\n"
+            "RENDERING\n"
+            "  +/-              Change thread width\n"
+            "  [/]              Change dark shading\n"
+            "  Shift+[/]        Change light shading\n"
+        )
         dlg = wx.MessageDialog(self, help_text, "Help", wx.OK | wx.ICON_INFORMATION)
         dlg.ShowModal()
         dlg.Destroy()
