@@ -346,6 +346,25 @@ class ProgressBarPanel(wx.Panel):
                 dc.SetPen(wx.Pen(wx_color, 1))
                 dc.DrawRectangle(x0, bar_y, bar_w - (x0 - bar_x), bar_h)
 
+        command_colors = {
+            "JUMP": wx.Colour(100, 100, 100),
+            "COLOR CHANGE": wx.Colour(210, 45, 45),
+            "TRIM": wx.Colour(230, 140, 20),
+        }
+        for stitch_index, commands in self.viewer.command_events.items():
+            marker_x = bar_x + int((stitch_index / total) * bar_w)
+            for marker_index, command in enumerate(commands):
+                marker_y = bar_y + marker_index * 5
+                marker = [
+                    (marker_x, marker_y),
+                    (marker_x - 4, marker_y + 5),
+                    (marker_x + 4, marker_y + 5),
+                ]
+                color = command_colors.get(command, wx.Colour(80, 80, 80))
+                dc.SetBrush(wx.Brush(color))
+                dc.SetPen(wx.Pen(color, 1))
+                dc.DrawPolygon(marker)
+
         progress_w = int((vis / total) * bar_w)
         dc.SetBrush(wx.Brush(wx.Colour(255, 255, 255, 150)))
         dc.SetPen(wx.TRANSPARENT_PEN)
@@ -368,9 +387,9 @@ class ProgressBarPanel(wx.Panel):
         dc.SetTextForeground(wx.Colour(30, 30, 30))
 
         txt_left = f"{vis}/{total} stitches"
-        command = self.viewer.command_events.get(vis, "")
-        if command:
-            txt_left += f" | {command}"
+        commands = self.viewer.command_events.get(vis, ())
+        if commands:
+            txt_left += f" | {' | '.join(commands)}"
         txt_center = f"{vis / total * 100:.1f}%"
         if hasattr(self.viewer, "bounds") and self.viewer.bounds != (0, 0, 0, 0):
             bw = self.viewer.bounds[2] - self.viewer.bounds[0]
@@ -575,6 +594,24 @@ class EmbroideryViewerPanel(wx.Panel):
             else:
                 self.visible_count = prev
 
+    def JumpToCommand(self, direction):
+        """Move to the nearest recorded JUMP, TRIM, or color-change event."""
+        positions = sorted(self.command_events)
+        if not positions:
+            return False
+        current = self.visible_count
+        if direction > 0:
+            targets = (position for position in positions if position > current)
+        else:
+            targets = (
+                position for position in reversed(positions) if position < current
+            )
+        target = next(targets, None)
+        if target is None:
+            return False
+        self.visible_count = target
+        return True
+
     def OnKeyDown(self, e):
         """Handle playback, navigation, display, and view shortcut keys."""
         now = time.time()
@@ -595,9 +632,20 @@ class EmbroideryViewerPanel(wx.Panel):
         total = self.stitches_np.shape[0]
         is_alt = e.AltDown()
         is_ctrl = e.ControlDown()
+        is_shift = e.ShiftDown()
         changed = False
         step = 1 if is_alt else self.step_size
-        if self.is_playing and not is_alt and not is_ctrl and key in (
+        if is_shift and not is_alt and not is_ctrl and key in (
+            wx.WXK_RIGHT,
+            wx.WXK_LEFT,
+        ):
+            changed = self.JumpToCommand(
+                1 if key == wx.WXK_RIGHT else -1
+            )
+            if changed and self.is_playing:
+                self.play_timer.Stop()
+                self.is_playing = False
+        elif self.is_playing and not is_alt and not is_ctrl and key in (
             wx.WXK_RIGHT,
             wx.WXK_LEFT,
         ):
@@ -703,7 +751,7 @@ class EmbroideryViewerPanel(wx.Panel):
 
     def ShowHelp(self):
         """Show the keyboard and mouse controls used by the viewer."""
-        help_text = f"{APP_TITLE}\n\nMouse: Wheel=Zoom Drag=Pan Click bar=Seek\n\nPlayback:\n  Right/Left - speed up/down while playing\n  Alt+Right/Left - +/- 1 stitch when stopped\n  Ctrl+Right/Left - Next/Prev color\n  Up/Down - Fast seek when stopped\n  Home/End - First/Last\n  Space - Play/Pause toggle\n  C - Center design\n  F - Fit design to window\n  F11 - Toggle fullscreen\n  Esc - Stop\n\nView: +/- width G=grid H=help\nShading: [ ] - dark factor  Shift+[ ] - light factor\nInfo: I - viewer settings\n"
+        help_text = f"{APP_TITLE}\n\nMouse: Wheel=Zoom Drag=Pan Click bar=Seek\n\nPlayback:\n  Right/Left - speed up/down while playing\n  Alt+Right/Left - +/- 1 stitch when stopped\n  Shift+Right/Left - Next/Prev command\n  Ctrl+Right/Left - Next/Prev color\n  Up/Down - Fast seek when stopped\n  Home/End - First/Last\n  Space - Play/Pause toggle\n  C - Center design\n  F - Fit design to window\n  F11 - Toggle fullscreen\n  Esc - Stop\n\nView: +/- width G=grid H=help\nShading: [ ] - dark factor  Shift+[ ] - light factor\nInfo: I - viewer settings\n"
         dlg = wx.MessageDialog(self, help_text, "Help", wx.OK | wx.ICON_INFORMATION)
         dlg.ShowModal()
         dlg.Destroy()
@@ -774,10 +822,7 @@ class EmbroideryViewerPanel(wx.Panel):
             cmd = st[2] if len(st) > 2 else 0
             if hasattr(emb, "JUMP") and cmd == emb.JUMP:
                 event_position = len(segs)
-                previous_event = self.command_events.get(event_position)
-                self.command_events[event_position] = (
-                    f"{previous_event} | JUMP" if previous_event else "JUMP"
-                )
+                self.command_events.setdefault(event_position, []).append("JUMP")
                 last_x, last_y = x, y
                 continue
             if hasattr(emb, "END") and cmd == emb.END:
@@ -786,11 +831,8 @@ class EmbroideryViewerPanel(wx.Panel):
                 cmd == emb.COLOR_CHANGE or (cmd & 0x04)
             ):
                 event_position = len(segs)
-                previous_event = self.command_events.get(event_position)
-                self.command_events[event_position] = (
-                    f"{previous_event} | COLOR CHANGE"
-                    if previous_event
-                    else "COLOR CHANGE"
+                self.command_events.setdefault(event_position, []).append(
+                    "COLOR CHANGE"
                 )
                 cur_color_idx += 1
                 if segs:
@@ -799,10 +841,7 @@ class EmbroideryViewerPanel(wx.Panel):
                 continue
             if hasattr(emb, "TRIM") and cmd == emb.TRIM:
                 event_position = len(segs)
-                previous_event = self.command_events.get(event_position)
-                self.command_events[event_position] = (
-                    f"{previous_event} | TRIM" if previous_event else "TRIM"
-                )
+                self.command_events.setdefault(event_position, []).append("TRIM")
                 continue
             if has_thread_colors:
                 color_idx = min(cur_color_idx, len(palette) - 1)
