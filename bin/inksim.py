@@ -138,9 +138,9 @@ def render_shaded_numba(
     h, w, _ = buf.shape
     # The configured width is measured at zoom 1.0; scale it with the
     # world-to-screen transform so thread thickness follows the design.
-    effective_line_width = line_width * zoom
+    effective_line_width = max(1.0, line_width * zoom)
     hw = effective_line_width * 0.5
-    lw_int = int(effective_line_width)
+    lw_int = max(1, int(np.ceil(effective_line_width)))
 
     for i in range(visible_count):
         # Convert segment endpoints from world space (mm) to screen pixels.
@@ -161,7 +161,7 @@ def render_shaded_numba(
         # Compute the segment length in pixels and sample points along it.
         dx = x2 - x1
         dy = y2 - y1
-        length = int(np.sqrt(dx*dx + dy*dy)) + 1
+        length = np.sqrt(dx*dx + dy*dy)
         if length <= 0: continue
 
         # Precompute dark/light variants for pseudo-3D thread shading.
@@ -172,8 +172,9 @@ def render_shaded_numba(
         g_light = int(g_base + (255 - g_base) * light_factor)
         b_light = int(b_base + (255 - b_base) * light_factor)
 
-        steps = length
-        steps = max(steps, 1)
+        # Sample twice per screen pixel to keep short stitches connected
+        # when zooming out and the projected segments become sub-pixel-sized.
+        steps = max(1, int(np.ceil(length * 2.0)))
         for s in range(steps+1):
             t = s / steps
             x = x1 + dx * t
