@@ -509,6 +509,25 @@ class EmbroideryViewerPanel(wx.Panel):
         self.zoom = min(zoom_x, zoom_y)
         self.CenterDesign()
 
+    def SetOneToOne(self):
+        """Display the design at its physical size when display PPI is known."""
+        if self.stitches_np.shape[0] == 0:
+            return
+        try:
+            display_index = wx.Display.GetFromWindow(self)
+            if display_index == wx.NOT_FOUND:
+                display_index = 0
+            ppi = wx.Display(display_index).GetPPI()
+            ppi_x = float(ppi.x)
+            ppi_y = float(ppi.y)
+            if ppi_x <= 0 or ppi_y <= 0:
+                raise ValueError("invalid display PPI")
+            pixels_per_mm = (ppi_x + ppi_y) / (2.0 * 25.4)
+        except (AttributeError, TypeError, ValueError, wx.PyNoAppError):
+            pixels_per_mm = 96.0 / 25.4
+        self.zoom = pixels_per_mm
+        self.CenterDesign()
+
     def CenterDesign(self):
         """Center the loaded design without changing its current zoom."""
         if self.stitches_np.shape[0] == 0:
@@ -722,6 +741,9 @@ class EmbroideryViewerPanel(wx.Panel):
         elif key in (ord("F"), ord("f")):
             self.FitToScreen()
             return
+        elif key == ord("1"):
+            self.SetOneToOne()
+            return
         elif key == wx.WXK_F11:
             frame = wx.GetTopLevelParent(self)
             if hasattr(frame, "ToggleFullScreen"):
@@ -758,7 +780,7 @@ class EmbroideryViewerPanel(wx.Panel):
 
     def ShowHelp(self):
         """Show the keyboard and mouse controls used by the viewer."""
-        help_text = f"{APP_TITLE}\n\nMouse: Wheel=Zoom Drag=Pan Click bar=Seek\n\nPlayback:\n  Right/Left - speed up/down while playing\n  Alt+Right/Left - +/- 1 stitch when stopped\n  Shift+Right/Left - Next/Prev command\n  Ctrl+Right/Left - Next/Prev color\n  Up/Down - Fast seek when stopped\n  Home/End - First/Last\n  Space - Play/Pause toggle\n  C - Center design\n  F - Fit design to window\n  F11 - Toggle fullscreen\n  Esc - Stop\n\nView: +/- width G=grid H=help\nShading: [ ] - dark factor  Shift+[ ] - light factor\nInfo: I - viewer settings\n"
+        help_text = f"{APP_TITLE}\n\nMouse: Wheel=Zoom Drag=Pan Click bar=Seek\n\nPlayback:\n  Right/Left - speed up/down while playing\n  Alt+Right/Left - +/- 1 stitch when stopped\n  Shift+Right/Left - Next/Prev command\n  Ctrl+Right/Left - Next/Prev color\n  Up/Down - Fast seek when stopped\n  Home/End - First/Last\n  Space - Play/Pause toggle\n  C - Center design\n  F - Fit design to window\n  F11 - Toggle fullscreen\n  1 - Show design at physical 1:1 size\n  Esc - Stop\n\nView: +/- width G=grid H=help\nShading: [ ] - dark factor  Shift+[ ] - light factor\nInfo: I - viewer settings\n"
         dlg = wx.MessageDialog(self, help_text, "Help", wx.OK | wx.ICON_INFORMATION)
         dlg.ShowModal()
         dlg.Destroy()
