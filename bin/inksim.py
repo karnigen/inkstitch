@@ -12,6 +12,7 @@ script_dir = Path(__file__).resolve().parent
 
 # !!! Hardcoded relative path to the virtual environment directory - adjust if you move this script.
 venv_dir = (script_dir / ".." / ".venv").resolve()
+APP_TITLE = "InkSim"
 
 def ensure_venv():
     # print(f"{sys.prefix=}"); print(f"{sys.base_prefix=}")
@@ -36,9 +37,7 @@ ensure_venv()
 import wx
 import time
 import numpy as np
-
 import numba
-
 import pystitch as emb
 
 @numba.njit
@@ -588,7 +587,7 @@ class PesViewerFastPanel(wx.Panel):
 
     def ShowHelp(self):
         """Show the keyboard and mouse controls used by the viewer."""
-        help_text = "PES Viewer PRO\n\nMouse: Wheel=Zoom Drag=Pan Click bar=Seek\n\nPlayback:\n  Right/Left - +/- step\n  Alt+Right/Left - +/- 1\n  Ctrl+Right/Left - Next/Prev color\n  Up/Down - Fast\n  Home/End - First/Last\n  Space - Play/Pause toggle\n  C - Forward  V - Backward\n  Esc - Stop\n\nView: +/- width F=fit G=grid H=help\n"
+        help_text = f"{APP_TITLE}\n\nMouse: Wheel=Zoom Drag=Pan Click bar=Seek\n\nPlayback:\n  Right/Left - +/- step\n  Alt+Right/Left - +/- 1\n  Ctrl+Right/Left - Next/Prev color\n  Up/Down - Fast\n  Home/End - First/Last\n  Space - Play/Pause toggle\n  C - Forward  V - Backward\n  Esc - Stop\n\nView: +/- width F=fit G=grid H=help\n"
         dlg = wx.MessageDialog(self, help_text, "Help", wx.OK | wx.ICON_INFORMATION)
         dlg.ShowModal()
         dlg.Destroy()
@@ -740,36 +739,52 @@ class PesViewerFastPanel(wx.Panel):
 
 
 class Frame(wx.Frame):
+    """Main InkSim window coordinating the viewer and playback controls."""
+
     def __init__(self, initial_file=None):
-        super().__init__(None,title="PES Viewer PRO v2.2",size=(1200,980))
+        """Build the application window and optionally open a PES file."""
+        super().__init__(None, title=APP_TITLE, size=(1200, 980))
+
+        # Create the main panel, viewer, and progress bar, and arrange them vertically.
         main_panel = wx.Panel(self)
         sizer = wx.BoxSizer(wx.VERTICAL)
         self.viewer = PesViewerFastPanel(main_panel, None)
         self.progress = ProgressBarPanel(main_panel, self.viewer)
         self.viewer.progress_bar = self.progress
         self.progress.Bind(wx.EVT_LEFT_UP, self.viewer.OnLeftUp)
+
         sizer.Add(self.viewer, 1, wx.EXPAND)
-        sizer.Add(self.progress, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
+        sizer.Add(self.progress, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM,
+                  6)
         main_panel.SetSizer(sizer)
+
+        # Build the menu bar with file and playback options, and bind them to handlers.
         menubar = wx.MenuBar()
+
         fileMenu = wx.Menu()
         openItem = fileMenu.Append(wx.ID_OPEN, "Open .PES\tCtrl+O")
         fitItem = fileMenu.Append(wx.ID_ANY, "Fit to screen\tF")
-        gridItem = fileMenu.AppendCheckItem(wx.ID_ANY, "Show 1cm grid\tG"); gridItem.Check(True)
+        gridItem = fileMenu.AppendCheckItem(wx.ID_ANY, "Show 1cm grid\tG")
+        gridItem.Check(True)
         helpItem = fileMenu.Append(wx.ID_ANY, "Help\tH")
         menubar.Append(fileMenu, "File")
+
         playbackMenu = wx.Menu()
         s1 = playbackMenu.AppendRadioItem(wx.ID_ANY, "Step 1 (Alt+Arrows)")
-        s10 = playbackMenu.AppendRadioItem(wx.ID_ANY, "Step 10"); s10.Check(True)
+        s10 = playbackMenu.AppendRadioItem(wx.ID_ANY, "Step 10")
+        s10.Check(True)
         s50 = playbackMenu.AppendRadioItem(wx.ID_ANY, "Step 50")
         s100 = playbackMenu.AppendRadioItem(wx.ID_ANY, "Step 100")
         s500 = playbackMenu.AppendRadioItem(wx.ID_ANY, "Step 500")
         playbackMenu.AppendSeparator()
+
         playItem = playbackMenu.Append(wx.ID_ANY, "Play/Pause\tSpace")
         nextCol = playbackMenu.Append(wx.ID_ANY, "Next color\tCtrl+Right")
         prevCol = playbackMenu.Append(wx.ID_ANY, "Prev color\tCtrl+Left")
         menubar.Append(playbackMenu, "Playback")
         self.SetMenuBar(menubar)
+
+        # Bind menu items to their handlers.
         self.Bind(wx.EVT_MENU, self.OnOpen, openItem)
         self.Bind(wx.EVT_MENU, lambda e: self.viewer.FitToScreen(), fitItem)
         self.Bind(wx.EVT_MENU, self.OnToggleGrid, gridItem)
@@ -779,34 +794,63 @@ class Frame(wx.Frame):
         self.Bind(wx.EVT_MENU, lambda e: self.viewer.SetStepSize(50), s50)
         self.Bind(wx.EVT_MENU, lambda e: self.viewer.SetStepSize(100), s100)
         self.Bind(wx.EVT_MENU, lambda e: self.viewer.SetStepSize(500), s500)
-        self.Bind(wx.EVT_MENU, lambda e: self.viewer.ToggleAutoPlay(True), playItem)
-        self.Bind(wx.EVT_MENU, lambda e: self.viewer.JumpToColor(1) or self._refresh_after_color_jump(), nextCol)
-        self.Bind(wx.EVT_MENU, lambda e: self.viewer.JumpToColor(-1) or self._refresh_after_color_jump(), prevCol)
+        self.Bind(wx.EVT_MENU, lambda e: self.viewer.ToggleAutoPlay(True),
+                  playItem)
+        self.Bind(
+            wx.EVT_MENU, lambda e: self.viewer.JumpToColor(1) or self.
+            _refresh_after_color_jump(), nextCol)
+        self.Bind(
+            wx.EVT_MENU, lambda e: self.viewer.JumpToColor(-1) or self.
+            _refresh_after_color_jump(), prevCol)
+
+        # Set up the status bar with instructions.
         self.CreateStatusBar()
-        self.SetStatusText("Space=play/pause | Ctrl+Arrows=color | Alt+Arrows=1 | F=fit G=grid H=help")
-        self.Centre(); self.Show()
-        if initial_file and os.path.exists(initial_file):
-            if self.viewer.LoadPes(initial_file, fit_to_screen=True):
-                total=self.viewer.stitches_np.shape[0]
-                bw=self.viewer.bounds[2]-self.viewer.bounds[0]; bh=self.viewer.bounds[3]-self.viewer.bounds[1]
-                self.SetTitle(f"PES Viewer PRO v2.2 - {os.path.basename(initial_file)} - {total} sts")
+        self.SetStatusText(
+            "Space=play/pause | Ctrl+Arrows=color | Alt+Arrows=1 | F=fit G=grid H=help"
+        )
+
+        # Center the window, show it, and optionally load a PES file.
+        self.Centre()
+        self.Show()
+        if (initial_file and os.path.exists(initial_file)
+                and self.viewer.LoadPes(initial_file, fit_to_screen=True)):
+            total = self.viewer.stitches_np.shape[0]
+            self.SetTitle(
+                f"{APP_TITLE} - {os.path.basename(initial_file)} - {total} sts"
+            )
+
     def _refresh_after_color_jump(self):
-        self.viewer.need_redraw=True; self.viewer.Refresh(); self.progress.Refresh()
+        """Refresh the viewer and timeline after a color-boundary jump."""
+        self.viewer.need_redraw = True
+        self.viewer.Refresh()
+        self.progress.Refresh()
+
     def OnToggleGrid(self, e):
-        self.viewer.show_grid=e.IsChecked(); self.viewer.need_redraw=True; self.viewer.Refresh()
-    def OnOpen(self,e):
-        dlg=wx.FileDialog(self,"Open PES",wildcard="PES (*.pes)|*.pes|All|*.*",style=wx.FD_OPEN)
-        if dlg.ShowModal()==wx.ID_OK:
-            path=dlg.GetPath()
+        """Apply the grid menu state to the viewer and redraw it."""
+        self.viewer.show_grid = e.IsChecked()
+        self.viewer.need_redraw = True
+        self.viewer.Refresh()
+
+    def OnOpen(self, e):
+        """Prompt for a PES file, load it, and update the window metadata."""
+        dlg = wx.FileDialog(self,
+                            "Open PES",
+                            wildcard="PES (*.pes)|*.pes|All|*.*",
+                            style=wx.FD_OPEN)
+        if dlg.ShowModal() == wx.ID_OK:
+            path = dlg.GetPath()
             if self.viewer.LoadPes(path, fit_to_screen=True):
-                total=self.viewer.stitches_np.shape[0]
-                bw=self.viewer.bounds[2]-self.viewer.bounds[0]; bh=self.viewer.bounds[3]-self.viewer.bounds[1]
-                self.SetTitle(f"PES Viewer PRO v2.2 - {os.path.basename(path)} - {total} sts - {bw:.1f}x{bh:.1f}mm")
+                total = self.viewer.stitches_np.shape[0]
+                bw = self.viewer.bounds[2] - self.viewer.bounds[0]
+                bh = self.viewer.bounds[3] - self.viewer.bounds[1]
+                self.SetTitle(
+                    f"{APP_TITLE} - {os.path.basename(path)} - {total} sts - {bw:.1f}x{bh:.1f}mm"
+                )
                 self.progress.Refresh()
         dlg.Destroy()
 
 if __name__ == "__main__":
-    parser=argparse.ArgumentParser(description="PES Viewer PRO v2.2")
+    parser = argparse.ArgumentParser(description=APP_TITLE)
     parser.add_argument("pes_file", nargs="?", help="Input .pes file")
     args=parser.parse_args()
     app=wx.App()
