@@ -6,9 +6,11 @@ import os
 import argparse
 
 #-------------------------------------------------------------------
-# Dual run: python3 or .venv python
+# Dual run: system python3 or .venv python
 
 script_dir = Path(__file__).resolve().parent
+
+# !!! Hardcoded relative path to the virtual environment directory - adjust if you move this script.
 venv_dir = (script_dir / ".." / ".venv").resolve()
 
 def ensure_venv():
@@ -27,7 +29,7 @@ def ensure_venv():
     else:
         print(f"Warning: Virtual environment not found at {venv_dir}. Running with system Python.", file=sys.stderr)
 
-# start the virtual environment if not already active
+# restart the virtual environment if not already active
 ensure_venv()
 #-------------------------------------------------------------------
 
