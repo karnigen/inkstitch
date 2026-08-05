@@ -14,21 +14,6 @@ script_dir = Path(__file__).resolve().parent
 venv_dir = (script_dir / ".." / ".venv").resolve()
 APP_TITLE = "InkSim"
 
-
-def get_supported_input_wildcard():
-    """Build a wx file filter from the formats readable by pystitch."""
-    extensions = set()
-    for file_type in emb.EmbPattern.supported_formats():
-        if file_type.get("reader") is None:
-            continue
-        file_extensions = file_type.get("extensions", ())
-        if isinstance(file_extensions, str):
-            file_extensions = (file_extensions,)
-        extensions.update(ext.lstrip(".").lower() for ext in file_extensions)
-
-    patterns = ";".join(f"*.{ext}" for ext in sorted(extensions))
-    return f"Embroidery files ({patterns})|{patterns}|All files|*.*"
-
 def ensure_venv():
     # print(f"{sys.prefix=}"); print(f"{sys.base_prefix=}")
     if sys.prefix != sys.base_prefix: # we are in a virtual environment
@@ -117,7 +102,18 @@ def render_grid_numba(buf, zoom, pan_x, pan_y):
                 buf[sy, x, 0] = r; buf[sy, x, 1] = g; buf[sy, x, 2] = b
 
 @numba.njit
-def render_shaded_numba(buf, stitches, visible_count, zoom, pan_x, pan_y, use_gradient, line_width):
+def render_shaded_numba(
+    buf,
+    stitches,
+    visible_count,
+    zoom,
+    pan_x,
+    pan_y,
+    use_gradient,
+    line_width,
+    dark_factor,
+    light_factor,
+):
     # Draw visible stitch segments into the RGB buffer.
     # Each segment is [x1, y1, x2, y2, r, g, b] in mm + base thread color.
     # We project mm -> screen pixels using zoom/pan and then rasterize.
@@ -145,8 +141,12 @@ def render_shaded_numba(buf, stitches, visible_count, zoom, pan_x, pan_y, use_gr
         if length <= 0: continue
 
         # Precompute dark/light variants for pseudo-3D thread shading.
-        r_dark = int(r_base * 0.35); g_dark = int(g_base * 0.35); b_dark = int(b_base * 0.35)
-        r_light = int(r_base + (255 - r_base)*0.75); g_light = int(g_base + (255 - g_base)*0.75); b_light = int(b_base + (255 - b_base)*0.75)
+        r_dark = int(r_base * dark_factor)
+        g_dark = int(g_base * dark_factor)
+        b_dark = int(b_base * dark_factor)
+        r_light = int(r_base + (255 - r_base) * light_factor)
+        g_light = int(g_base + (255 - g_base) * light_factor)
+        b_light = int(b_base + (255 - b_base) * light_factor)
 
         steps = length
         steps = max(steps, 1)
@@ -179,6 +179,21 @@ def render_shaded_numba(buf, stitches, visible_count, zoom, pan_x, pan_y, use_gr
                                 buf[yi, xi, 0] = (buf[yi, xi, 0] + r)//2
                                 buf[yi, xi, 1] = (buf[yi, xi, 1] + g)//2
                                 buf[yi, xi, 2] = (buf[yi, xi, 2] + b)//2
+
+
+def get_supported_input_wildcard():
+    """Build a wx file filter from the formats readable by pystitch."""
+    extensions = set()
+    for file_type in emb.EmbPattern.supported_formats():
+        if file_type.get("reader") is None:
+            continue
+        file_extensions = file_type.get("extensions", ())
+        if isinstance(file_extensions, str):
+            file_extensions = (file_extensions,)
+        extensions.update(ext.lstrip(".").lower() for ext in file_extensions)
+
+    patterns = ";".join(f"*.{ext}" for ext in sorted(extensions))
+    return f"Embroidery files ({patterns})|{patterns}|All files|*.*"
 
 class ProgressBarPanel(wx.Panel):
     """Interactive stitch timeline shown below the embroidery viewer.
@@ -355,6 +370,9 @@ class EmbroideryViewerPanel(wx.Panel):
         self.drag_start = None
         self.pan_start = (0, 0)
         self.line_width = 2.0
+        self.dark_factor = 0.75
+        self.light_factor = 0.85
+        self.shading_step = 0.05
         self.visible_count = 0
         self.step_size = 10
         self.show_grid = True
@@ -557,6 +575,21 @@ class EmbroideryViewerPanel(wx.Panel):
         elif key in (ord("-"), ord("_"), wx.WXK_NUMPAD_SUBTRACT):
             self.line_width = max(0.5, self.line_width - 0.5)
             changed = True
+        elif key in (ord("["), ord("{"), ord("]"), ord("}")):
+            shading_delta = self.shading_step
+            if key in (ord("["), ord("{")):
+                shading_delta = -shading_delta
+            if e.ShiftDown() or key in (ord("{"), ord("}")):
+                self.light_factor = max(
+                    0.0,
+                    min(1.0, self.light_factor + shading_delta),
+                )
+            else:
+                self.dark_factor = max(
+                    0.05,
+                    min(1.0, self.dark_factor + shading_delta),
+                )
+            changed = True
         elif key in (ord("C"), ord("c")):
             self.ToggleAutoPlay(forward=True)
             return
@@ -571,6 +604,9 @@ class EmbroideryViewerPanel(wx.Panel):
             changed = True
         elif key in (ord("H"), ord("h")):
             self.ShowHelp()
+            return
+        elif key in (ord("I"), ord("i")):
+            self.ShowSettings()
             return
         elif key == wx.WXK_ESCAPE:
             if self.is_playing:
@@ -602,8 +638,46 @@ class EmbroideryViewerPanel(wx.Panel):
 
     def ShowHelp(self):
         """Show the keyboard and mouse controls used by the viewer."""
-        help_text = f"{APP_TITLE}\n\nMouse: Wheel=Zoom Drag=Pan Click bar=Seek\n\nPlayback:\n  Right/Left - +/- step\n  Alt+Right/Left - +/- 1\n  Ctrl+Right/Left - Next/Prev color\n  Up/Down - Fast\n  Home/End - First/Last\n  Space - Play/Pause toggle\n  C - Forward  V - Backward\n  Esc - Stop\n\nView: +/- width F=fit G=grid H=help\n"
+        help_text = f"{APP_TITLE}\n\nMouse: Wheel=Zoom Drag=Pan Click bar=Seek\n\nPlayback:\n  Right/Left - +/- step\n  Alt+Right/Left - +/- 1\n  Ctrl+Right/Left - Next/Prev color\n  Up/Down - Fast\n  Home/End - First/Last\n  Space - Play/Pause toggle\n  C - Forward  V - Backward\n  Esc - Stop\n\nView: +/- width F=fit G=grid H=help\nShading: [ ] - dark factor  Shift+[ ] - light factor\nInfo: I - viewer settings\n"
         dlg = wx.MessageDialog(self, help_text, "Help", wx.OK | wx.ICON_INFORMATION)
+        dlg.ShowModal()
+        dlg.Destroy()
+
+    def ShowSettings(self):
+        """Show the current viewer state and rendering parameters."""
+        total = self.stitches_np.shape[0]
+        min_x, min_y, max_x, max_y = self.bounds
+        width = max_x - min_x
+        height = max_y - min_y
+        settings_text = (
+            f"{APP_TITLE} viewer settings\n\n"
+            f"Design\n"
+            f"  Stitches: {self.visible_count}/{total}\n"
+            f"  Colors: {len(self.color_boundaries)} boundaries\n"
+            f"  Bounds: {width:.1f} x {height:.1f} mm\n\n"
+            f"Viewport\n"
+            f"  Zoom: {self.zoom:.3f}\n"
+            f"  Pan: {self.pan_x:.1f}, {self.pan_y:.1f} px\n"
+            f"  Grid: {'on' if self.show_grid else 'off'}\n"
+            f"  Gradient: {'on' if self.zoom > 1.2 else 'off'}\n\n"
+            f"Rendering\n"
+            f"  Line width: {self.line_width:.1f} px\n"
+            f"  Dark factor: {self.dark_factor:.2f}\n"
+            f"  Light factor: {self.light_factor:.2f}\n"
+            f"  Shading step: {self.shading_step:.2f}\n\n"
+            f"Playback\n"
+            f"  Step size: {self.step_size}\n"
+            f"  Timer interval: {self.play_speed} ms\n"
+            f"  Timer step: {self.play_step} stitches\n"
+            f"  Direction: {'forward' if self._last_dir > 0 else 'backward'}\n"
+            f"  Playing: {'yes' if self.is_playing else 'no'}"
+        )
+        dlg = wx.MessageDialog(
+            self,
+            settings_text,
+            "Viewer settings",
+            wx.OK | wx.ICON_INFORMATION,
+        )
         dlg.ShowModal()
         dlg.Destroy()
 
@@ -713,6 +787,8 @@ class EmbroideryViewerPanel(wx.Panel):
                 self.pan_y,
                 use_gradient,
                 self.line_width,
+                self.dark_factor,
+                self.light_factor,
             )
         img = wx.Image(w, h)
         img.SetData(buf.tobytes())
