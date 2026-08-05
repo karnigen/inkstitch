@@ -136,7 +136,7 @@ def render_shaded_numba(
     # Each segment is [x1, y1, x2, y2, r, g, b] in mm + base thread color.
     # We project mm -> screen pixels using zoom/pan and then rasterize.
     h, w, _ = buf.shape
-    # The configured width is measured at zoom 1.0; scale it with the
+    # The configured width is in mm; convert it to screen pixels with the
     # world-to-screen transform so thread thickness follows the design.
     effective_line_width = max(1.0, line_width * zoom)
     hw = effective_line_width * 0.5
@@ -781,7 +781,7 @@ class EmbroideryViewerPanel(wx.Panel):
             f"  Grid: {'on' if self.show_grid else 'off'}\n"
             f"  Gradient: {'on' if self.zoom > 1.2 else 'off'}\n\n"
             f"Rendering\n"
-            f"  Line width: {self.line_width:.1f} px\n"
+            f"  Line width: {self.line_width:.1f} mm\n"
             f"  Dark factor: {self.dark_factor:.2f}\n"
             f"  Light factor: {self.light_factor:.2f}\n"
             f"  Shading step: {self.shading_step:.2f}\n\n"
