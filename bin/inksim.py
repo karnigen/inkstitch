@@ -41,37 +41,62 @@ import pystitch as emb
 
 @numba.njit
 def render_grid_numba(buf, zoom, pan_x, pan_y):
+    # Draws a 1 cm reference grid (plus a 5 cm major line and the x=0/y=0 axes)
+    # into the RGB image buffer `buf` (shape HxWx3, dtype uint8).
+    # `zoom` maps world (mm) to screen pixels; `pan_x`/`pan_y` is the screen
+
+    # offset of the world origin (0, 0).
     h, w, _ = buf.shape
+
+    # Visible world-space rectangle covered by the current viewport.
     x_world_min = (-pan_x) / zoom
     x_world_max = (w - pan_x) / zoom
     y_world_min = (-pan_y) / zoom
     y_world_max = (h - pan_y) / zoom
+
+    # Snap to the nearest 10 mm (1 cm) grid line on each side so we cover the
+    # whole visible area including the partially visible lines at the edges.
     x_start = int(np.floor(x_world_min / 10.0) * 10)
     x_end = int(np.ceil(x_world_max / 10.0) * 10)
     y_start = int(np.floor(y_world_min / 10.0) * 10)
     y_end = int(np.ceil(y_world_max / 10.0) * 10)
+
+    # --- Vertical grid lines (iterate over world-x in 10 mm steps) ---
     for xw in range(x_start, x_end+1, 10):
+
+        # Project this world-x line into screen space.
         sx = int(xw * zoom + pan_x)
         if sx < 0 or sx >= w: continue
+
+        # Pick style: 0 mm = red axis, multiples of 50 mm = grey major, else light grey minor.
         is_major = (xw % 50 == 0)
         is_axis = (xw == 0)
-        if is_axis: r,g,b = 200, 100, 100
-        elif is_major: r,g,b = 190, 190, 190
-        else: r,g,b = 230, 230, 230
+
+        if is_axis: r,g,b = 200, 100, 100      # Red axis
+        elif is_major: r,g,b = 190, 190, 190   # Grey major
+        else: r,g,b = 230, 230, 230            # Light grey minor
+
+        # Paint the full column. Axes are solid; minor lines are dashed (skip
+        # 2 out of every 3 rows) so the grid stays subtle at high zoom.
         for y in range(h):
             if is_axis:
                 buf[y, sx, 0] = r; buf[y, sx, 1] = g; buf[y, sx, 2] = b
             else:
                 if y % 3 != 0: continue
                 buf[y, sx, 0] = r; buf[y, sx, 1] = g; buf[y, sx, 2] = b
+
+    # --- Horizontal grid lines (mirror of the above, with green axis) ---
     for yw in range(y_start, y_end+1, 10):
+
         sy = int(yw * zoom + pan_y)
         if sy < 0 or sy >= h: continue
         is_major = (yw % 50 == 0)
         is_axis = (yw == 0)
-        if is_axis: r,g,b = 100, 200, 100
-        elif is_major: r,g,b = 190, 190, 190
-        else: r,g,b = 230, 230, 230
+
+        if is_axis: r,g,b = 100, 200, 100      # Green axis
+        elif is_major: r,g,b = 190, 190, 190   # Grey major
+        else: r,g,b = 230, 230, 230            # Light grey minor
+
         for x in range(w):
             if is_axis:
                 buf[sy, x, 0] = r; buf[sy, x, 1] = g; buf[sy, x, 2] = b
@@ -257,6 +282,7 @@ class PesViewerFastPanel(wx.Panel):
         self._last_key_time = 0
         self._key_throttle = 0.03
         self._last_dir = 1
+        self._pending_fit_to_screen = False
         self.play_timer = wx.Timer(self)
         self.play_speed = 20
         self.play_step = 10
@@ -273,7 +299,23 @@ class PesViewerFastPanel(wx.Panel):
         self.SetFocus()
     def OnSize(self, e):
         self.need_redraw = True
+        if self._pending_fit_to_screen and self.stitches_np.shape[0] > 0:
+            wx.CallAfter(self._try_fit_to_screen)
         e.Skip()
+
+    def _try_fit_to_screen(self, retries=20):
+        if not self._pending_fit_to_screen:
+            return
+        w, h = self.GetSize()
+        # During initial window creation wx can report tiny transient sizes.
+        # Wait a bit and retry so fit uses the final client geometry.
+        if w < 120 or h < 120:
+            if retries > 0:
+                wx.CallLater(30, self._try_fit_to_screen, retries - 1)
+            return
+        self._pending_fit_to_screen = False
+        self.FitToScreen()
+
     def FitToScreen(self):
         if self.stitches_np.shape[0] == 0: return
         min_x, min_y, max_x, max_y = self.bounds
@@ -441,7 +483,8 @@ class PesViewerFastPanel(wx.Panel):
             self.visible_count=self.stitches_np.shape[0]
             self.color_boundaries = sorted(set(self.color_boundaries))
             if fit_to_screen:
-                wx.CallAfter(self.FitToScreen)
+                self._pending_fit_to_screen = True
+                wx.CallAfter(self._try_fit_to_screen)
         self.need_redraw=True; self.Refresh()
         if self.progress_bar: self.progress_bar.Refresh()
         self.SetFocus()
