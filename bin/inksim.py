@@ -410,7 +410,9 @@ class EmbroideryViewerPanel(wx.Panel):
         self._pending_fit_to_screen = False
         self.play_timer = wx.Timer(self)
         self.play_speed = 20
-        self.play_step = 10
+        self.play_speed_levels = (5, 10, 20, 40, 80)
+        self.play_speed_index = 1
+        self.play_step = self.play_speed_levels[self.play_speed_index]
         self.is_playing = False
         self.Bind(wx.EVT_TIMER, self.OnPlayTimer, self.play_timer)
         self.Bind(wx.EVT_PAINT, self.OnPaint)
@@ -500,6 +502,18 @@ class EmbroideryViewerPanel(wx.Panel):
             self.play_timer.Start(self.play_speed)
             self.is_playing = True
 
+    def AdjustPlaybackSpeed(self, direction):
+        """Increase or decrease playback speed while preserving its direction."""
+        new_index = max(
+            0,
+            min(len(self.play_speed_levels) - 1, self.play_speed_index + direction),
+        )
+        if new_index == self.play_speed_index:
+            return False
+        self.play_speed_index = new_index
+        self.play_step = self.play_speed_levels[new_index]
+        return True
+
     def OnKeyUp(self, e):
         """Reset key-repeat throttling after a key is released."""
         self._last_key_time = 0
@@ -556,7 +570,15 @@ class EmbroideryViewerPanel(wx.Panel):
         is_ctrl = e.ControlDown()
         changed = False
         step = 1 if is_alt else self.step_size
-        if is_ctrl and key in (wx.WXK_RIGHT, wx.WXK_LEFT):
+        if self.is_playing and not is_alt and not is_ctrl and key in (
+            wx.WXK_RIGHT,
+            wx.WXK_LEFT,
+        ):
+            key_direction = 1 if key == wx.WXK_RIGHT else -1
+            changed = self.AdjustPlaybackSpeed(
+                key_direction * self._last_dir
+            )
+        elif is_ctrl and key in (wx.WXK_RIGHT, wx.WXK_LEFT):
             if key == wx.WXK_RIGHT:
                 self.JumpToColor(1)
                 self._last_dir = 1
@@ -638,15 +660,7 @@ class EmbroideryViewerPanel(wx.Panel):
         if changed:
             if (
                 self.is_playing
-                and key
-                in (
-                    wx.WXK_LEFT,
-                    wx.WXK_RIGHT,
-                    wx.WXK_UP,
-                    wx.WXK_DOWN,
-                    wx.WXK_HOME,
-                    wx.WXK_END,
-                )
+                and key in (wx.WXK_UP, wx.WXK_DOWN, wx.WXK_HOME, wx.WXK_END)
                 and not is_ctrl
             ):
                 self.play_timer.Stop()
@@ -660,7 +674,7 @@ class EmbroideryViewerPanel(wx.Panel):
 
     def ShowHelp(self):
         """Show the keyboard and mouse controls used by the viewer."""
-        help_text = f"{APP_TITLE}\n\nMouse: Wheel=Zoom Drag=Pan Click bar=Seek\n\nPlayback:\n  Right/Left - +/- step\n  Alt+Right/Left - +/- 1\n  Ctrl+Right/Left - Next/Prev color\n  Up/Down - Fast\n  Home/End - First/Last\n  Space - Play/Pause toggle\n  C - Forward  V - Backward\n  Esc - Stop\n\nView: +/- width F=fit G=grid H=help\nShading: [ ] - dark factor  Shift+[ ] - light factor\nInfo: I - viewer settings\n"
+        help_text = f"{APP_TITLE}\n\nMouse: Wheel=Zoom Drag=Pan Click bar=Seek\n\nPlayback:\n  Right/Left - speed up/down while playing\n  Alt+Right/Left - +/- 1 stitch when stopped\n  Ctrl+Right/Left - Next/Prev color\n  Up/Down - Fast seek when stopped\n  Home/End - First/Last\n  Space - Play/Pause toggle\n  C - Forward  V - Backward\n  Esc - Stop\n\nView: +/- width F=fit G=grid H=help\nShading: [ ] - dark factor  Shift+[ ] - light factor\nInfo: I - viewer settings\n"
         dlg = wx.MessageDialog(self, help_text, "Help", wx.OK | wx.ICON_INFORMATION)
         dlg.ShowModal()
         dlg.Destroy()
@@ -905,6 +919,7 @@ class Frame(wx.Frame):
         self.SetMenuBar(menubar)
 
         # Bind menu items to their handlers.
+        self.Bind(wx.EVT_CLOSE, self.OnClose)
         self.Bind(wx.EVT_MENU, self.OnOpen, openItem)
         self.Bind(wx.EVT_MENU, lambda e: self.viewer.FitToScreen(), fitItem)
         self.Bind(wx.EVT_MENU, self.OnToggleGrid, gridItem)
@@ -944,6 +959,13 @@ class Frame(wx.Frame):
         self.viewer.need_redraw = True
         self.viewer.Refresh()
         self.progress.Refresh()
+
+    def OnClose(self, e):
+        """Stop playback before allowing the frame to close."""
+        if self.viewer.is_playing:
+            self.viewer.play_timer.Stop()
+            self.viewer.is_playing = False
+        e.Skip()
 
     def OnToggleGrid(self, e):
         """Apply the grid menu state to the viewer and redraw it."""
