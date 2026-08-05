@@ -31,75 +31,62 @@ def ensure_venv():
 ensure_venv()
 #-------------------------------------------------------------------
 
-import time
+import argparse
+import os
 import wx
-import numpy as np
-import pystitch as emb
 
-class ThrottledCanvas(wx.Panel):
+class ProgressBarPanel(wx.Panel):
     def __init__(self, parent):
-        super().__init__(parent)
+        super().__init__(parent, size=(-1, 58))
+        self.SetMinSize((-1, 58))
         self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
-        self.stitches_np = np.zeros((0, 7), dtype=np.float32)
-        self.visible_count = 0
-
-        # Throttling parameters
-        self._last_key_time = 0.0
-        self._key_throttle_interval = 0.015  # Limit key events to max ~60 Hz
 
         self.Bind(wx.EVT_PAINT, self.OnPaint)
-        self.Bind(wx.EVT_KEY_DOWN, self.OnKeyDown)
-        self.SetFocus()
+        self.Bind(wx.EVT_SIZE, self.OnSize)
 
-    def OnKeyDown(self, event):
-        now = time.time()
-        # Suppress event if arriving faster than throttling interval
-        if (now - self._last_key_time) < self._key_throttle_interval:
-            return
-
-        self._last_key_time = now
-        key = event.GetKeyCode()
-        total = self.stitches_np.shape[0]
-
-        if key == wx.WXK_RIGHT:
-            self.visible_count = min(total, self.visible_count + 1)
-        elif key == wx.WXK_LEFT:
-            self.visible_count = max(0, self.visible_count - 1)
-        elif key == wx.WXK_UP:
-            self.visible_count = min(total, self.visible_count + 100)
-        elif key == wx.WXK_DOWN:
-            self.visible_count = max(0, self.visible_count - 100)
-        else:
-            event.Skip()
-            return
-
+    def OnSize(self, event):
         self.Refresh()
+        event.Skip()
 
     def OnPaint(self, event):
-        dc = wx.PaintDC(self)
+        dc = wx.AutoBufferedPaintDC(self)
+        w, h = self.GetClientSize()
+
+        # Draw base panel background
+        dc.SetBackground(wx.Brush(wx.Colour(235, 235, 235)))
         dc.Clear()
-        dc.DrawText(f"Throttled Input Active | Stitches: {self.visible_count} / {self.stitches_np.shape[0]}", 20, 20)
-        dc.DrawText("Hold Left/Right/Up/Down arrows (Events throttled to ~60 FPS max)", 20, 40)
+
+        # Track bounds
+        track_margin = 15
+        track_y = 12
+        track_h = 16
+        track_w = max(10, w - 2 * track_margin)
+
+        # Outer track frame
+        dc.SetPen(wx.Pen(wx.Colour(180, 180, 180), 1))
+        dc.SetBrush(wx.Brush(wx.Colour(210, 210, 210)))
+        dc.DrawRectangle(track_margin, track_y, track_w, track_h)
 
 class MainFrame(wx.Frame):
-    def __init__(self, initial_file=None):
-        super().__init__(None, title="PES Viewer - Step 15 (Input Throttling)", size=(1000, 700))
-        self.canvas = ThrottledCanvas(self)
+    def __init__(self):
+        super().__init__(None, title="PES Viewer - Step 16 (ProgressBar Base)", size=(1000, 700))
+        sizer = wx.BoxSizer(wx.VERTICAL)
 
-        if initial_file and os.path.exists(initial_file):
-            pattern = emb.read(initial_file)
-            segs = [(0, 0, st[0]/10.0, st[1]/10.0, 50, 100, 200) for st in pattern.stitches]
-            self.canvas.stitches_np = np.array(segs, dtype=np.float32)
-            self.canvas.visible_count = len(segs)
+        # Main Canvas Placeholder
+        self.canvas_placeholder = wx.Panel(self)
+        self.canvas_placeholder.SetBackgroundColour(wx.Colour(245, 245, 245))
 
+        # Bottom Progress Panel
+        self.progress_bar = ProgressBarPanel(self)
+
+        sizer.Add(self.canvas_placeholder, 1, wx.EXPAND)
+        sizer.Add(self.progress_bar, 0, wx.EXPAND)
+
+        self.SetSizer(sizer)
         self.Centre()
         self.Show()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("pes_file", nargs="?", help="Input .pes file")
-    args = parser.parse_args()
-
     app = wx.App()
-    MainFrame(initial_file=args.pes_file)
+    MainFrame()
     app.MainLoop()
