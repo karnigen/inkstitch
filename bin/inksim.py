@@ -410,8 +410,8 @@ class EmbroideryViewerPanel(wx.Panel):
         self._pending_fit_to_screen = False
         self.play_timer = wx.Timer(self)
         self.play_speed = 20
-        self.play_speed_levels = (5, 10, 20, 40, 80)
-        self.play_speed_index = 1
+        self.play_speed_levels = (1, 5, 10, 20, 40, 80)
+        self.play_speed_index = 2
         self.play_step = self.play_speed_levels[self.play_speed_index]
         self.is_playing = False
         self.Bind(wx.EVT_TIMER, self.OnPlayTimer, self.play_timer)
@@ -875,7 +875,14 @@ class EmbroideryViewerPanel(wx.Panel):
 class Frame(wx.Frame):
     """Main InkSim window coordinating the viewer and playback controls."""
 
-    def __init__(self, initial_file=None):
+    def __init__(
+        self,
+        initial_file=None,
+        fullscreen=False,
+        window_size=None,
+        window_position=None,
+        autoplay=False,
+    ):
         """Build the application window and optionally open a design file."""
         super().__init__(None, title=APP_TITLE, size=(1200, 980))
 
@@ -945,14 +952,29 @@ class Frame(wx.Frame):
         )
 
         # Center the window, show it, and optionally load a design file.
-        self.Centre()
+        if window_size:
+            self.SetSize(window_size)
+        if window_position:
+            self.SetPosition(window_position)
+        elif not window_size:
+            self.Centre()
         self.Show()
+        if fullscreen:
+            self.ShowFullScreen(True)
         if (initial_file and os.path.exists(initial_file)
                 and self.viewer.LoadDesign(initial_file, fit_to_screen=True)):
+            if fullscreen:
+                wx.CallAfter(self.viewer.FitToScreen)
             total = self.viewer.stitches_np.shape[0]
             self.SetTitle(
                 f"{APP_TITLE} - {os.path.basename(initial_file)} - {total} sts"
             )
+            if autoplay:
+                self.viewer.visible_count = 0
+                self.viewer.need_redraw = True
+                self.viewer.Refresh()
+                self.progress.Refresh()
+                self.viewer.ToggleAutoPlay(forward=True)
 
     def _refresh_after_color_jump(self):
         """Refresh the viewer and timeline after a color-boundary jump."""
@@ -991,10 +1013,56 @@ class Frame(wx.Frame):
                 self.progress.Refresh()
         dlg.Destroy()
 
+
+def _parse_pair(value, name, separator):
+    """Parse two integer values used for window geometry."""
+    parts = value.split(separator)
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError(
+            f"{name} must use the format VALUE{separator}VALUE"
+        )
+    try:
+        first, second = (int(part) for part in parts)
+    except ValueError as ex:
+        raise argparse.ArgumentTypeError(f"{name} values must be integers") from ex
+    if name == "size" and (first <= 0 or second <= 0):
+        raise argparse.ArgumentTypeError("size values must be greater than zero")
+    return first, second
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=APP_TITLE)
     parser.add_argument("input_file", nargs="?", help="Input embroidery file")
+    parser.add_argument(
+        "-f", "--fullscreen", action="store_true",
+        help="Open the simulator fullscreen",
+    )
+    parser.add_argument(
+        "-p", "--play", action="store_true",
+        help="Start simulation playback immediately",
+    )
+    parser.add_argument(
+        "--size",
+        metavar="WIDTHxHEIGHT",
+        type=lambda value: _parse_pair(value, "size", "x"),
+        help="Window size, for example 1600x1000",
+    )
+    parser.add_argument(
+        "--position",
+        metavar="X,Y",
+        type=lambda value: _parse_pair(value, "position", ","),
+        help="Window position, for example 100,50",
+    )
     args=parser.parse_args()
+
+    window_size = args.size
+    window_position = args.position
     app=wx.App()
-    Frame(initial_file=args.input_file)
+    Frame(
+        initial_file=args.input_file,
+        fullscreen=args.fullscreen,
+        window_size=window_size,
+        window_position=window_position,
+        autoplay=args.play,
+    )
     app.MainLoop()
