@@ -41,43 +41,40 @@ import pystitch as emb
 
 @numba.njit
 def render_grid_numba(buf, zoom, pan_x, pan_y):
-    # Draws a 1 cm reference grid (plus a 5 cm major line and the x=0/y=0 axes)
-    # into the RGB image buffer `buf` (shape HxWx3, dtype uint8).
-    # `zoom` maps world (mm) to screen pixels; `pan_x`/`pan_y` is the screen
-
-    # offset of the world origin (0, 0).
+    # Draw 1 cm helper grid into the RGB buffer.
+    # - every 10 mm: minor grid line
+    # - every 50 mm: major grid line
+    # - x=0 / y=0: highlighted axes
+    # zoom converts mm -> pixels, pan is screen-space origin offset.
     h, w, _ = buf.shape
 
-    # Visible world-space rectangle covered by the current viewport.
+    # World-space area currently visible in the viewport.
     x_world_min = (-pan_x) / zoom
     x_world_max = (w - pan_x) / zoom
     y_world_min = (-pan_y) / zoom
     y_world_max = (h - pan_y) / zoom
 
-    # Snap to the nearest 10 mm (1 cm) grid line on each side so we cover the
-    # whole visible area including the partially visible lines at the edges.
+    # Snap bounds to full 10 mm steps so edge lines are still drawn.
     x_start = int(np.floor(x_world_min / 10.0) * 10)
     x_end = int(np.ceil(x_world_max / 10.0) * 10)
     y_start = int(np.floor(y_world_min / 10.0) * 10)
     y_end = int(np.ceil(y_world_max / 10.0) * 10)
 
-    # --- Vertical grid lines (iterate over world-x in 10 mm steps) ---
+    # Vertical lines.
     for xw in range(x_start, x_end+1, 10):
-
-        # Project this world-x line into screen space.
+        # Project world x to screen x.
         sx = int(xw * zoom + pan_x)
         if sx < 0 or sx >= w: continue
 
-        # Pick style: 0 mm = red axis, multiples of 50 mm = grey major, else light grey minor.
+        # Choose line style.
         is_major = (xw % 50 == 0)
         is_axis = (xw == 0)
 
-        if is_axis: r,g,b = 200, 100, 100      # Red axis
-        elif is_major: r,g,b = 190, 190, 190   # Grey major
-        else: r,g,b = 230, 230, 230            # Light grey minor
+        if is_axis: r,g,b = 200, 100, 100      # red axis
+        elif is_major: r,g,b = 190, 190, 190   # major line
+        else: r,g,b = 230, 230, 230            # minor line
 
-        # Paint the full column. Axes are solid; minor lines are dashed (skip
-        # 2 out of every 3 rows) so the grid stays subtle at high zoom.
+        # Keep minor/major lines subtle using a dotted pattern.
         for y in range(h):
             if is_axis:
                 buf[y, sx, 0] = r; buf[y, sx, 1] = g; buf[y, sx, 2] = b
@@ -85,17 +82,16 @@ def render_grid_numba(buf, zoom, pan_x, pan_y):
                 if y % 3 != 0: continue
                 buf[y, sx, 0] = r; buf[y, sx, 1] = g; buf[y, sx, 2] = b
 
-    # --- Horizontal grid lines (mirror of the above, with green axis) ---
+    # Horizontal lines (same logic as vertical).
     for yw in range(y_start, y_end+1, 10):
-
         sy = int(yw * zoom + pan_y)
         if sy < 0 or sy >= h: continue
         is_major = (yw % 50 == 0)
         is_axis = (yw == 0)
 
-        if is_axis: r,g,b = 100, 200, 100      # Green axis
-        elif is_major: r,g,b = 190, 190, 190   # Grey major
-        else: r,g,b = 230, 230, 230            # Light grey minor
+        if is_axis: r,g,b = 100, 200, 100      # green axis
+        elif is_major: r,g,b = 190, 190, 190   # major line
+        else: r,g,b = 230, 230, 230            # minor line
 
         for x in range(w):
             if is_axis:
@@ -106,36 +102,56 @@ def render_grid_numba(buf, zoom, pan_x, pan_y):
 
 @numba.njit
 def render_shaded_numba(buf, stitches, visible_count, zoom, pan_x, pan_y, use_gradient, line_width):
+    # Draw visible stitch segments into the RGB buffer.
+    # Each segment is [x1, y1, x2, y2, r, g, b] in mm + base thread color.
+    # We project mm -> screen pixels using zoom/pan and then rasterize.
     h, w, _ = buf.shape
     hw = line_width * 0.5
     lw_int = int(line_width)
+
     for i in range(visible_count):
+        # Convert segment endpoints from world space (mm) to screen pixels.
         x1 = stitches[i,0] * zoom + pan_x
         y1 = stitches[i,1] * zoom + pan_y
         x2 = stitches[i,2] * zoom + pan_x
         y2 = stitches[i,3] * zoom + pan_y
+
+        # Get base thread color for this segment.
         r_base = int(stitches[i,4]); g_base = int(stitches[i,5]); b_base = int(stitches[i,6])
+
+        # Cheap reject: ignore segments completely far outside the viewport.
         if (x1 < -200 and x2 < -200) or (x1 > w+200 and x2 > w+200): continue
         if (y1 < -200 and y2 < -200) or (y1 > h+200 and y2 > h+200): continue
+
+        # Compute the segment length in pixels and sample points along it.
         dx = x2 - x1; dy = y2 - y1
         length = int(np.sqrt(dx*dx + dy*dy)) + 1
         if length <= 0: continue
+
+        # Precompute dark/light variants for pseudo-3D thread shading.
         r_dark = int(r_base * 0.35); g_dark = int(g_base * 0.35); b_dark = int(b_base * 0.35)
         r_light = int(r_base + (255 - r_base)*0.75); g_light = int(g_base + (255 - g_base)*0.75); b_light = int(b_base + (255 - b_base)*0.75)
+
         steps = length
-        if steps < 1: steps = 1
+        steps = max(steps, 1)
         for s in range(steps+1):
             t = s / steps
             x = x1 + dx*t; y = y1 + dy*t
+
+            # Optional gradient along the segment to make stitches look less flat.
             if use_gradient:
                 r = int(r_dark + (r_light - r_dark)*t); g = int(g_dark + (g_light - g_dark)*t); b = int(b_dark + (b_light - b_dark)*t)
             else:
                 r = r_base; g = g_base; b = b_base
+
+            # Fast path for thin lines (single pixel footprint).
             if lw_int <= 1:
                 xi = int(x); yi = int(y)
                 if 0 <= xi < w and 0 <= yi < h:
                     buf[yi, xi, 0] = r; buf[yi, xi, 1] = g; buf[yi, xi, 2] = b
             else:
+                # Thick lines: draw a disk around each sampled point.
+                # Interior pixels are solid, rim pixels are blended for a softer edge.
                 for oy in range(-lw_int, lw_int+1):
                     for ox in range(-lw_int, lw_int+1):
                         if ox*ox + oy*oy > hw*hw + 1: continue
@@ -307,8 +323,9 @@ class PesViewerFastPanel(wx.Panel):
         if not self._pending_fit_to_screen:
             return
         w, h = self.GetSize()
-        # During initial window creation wx can report tiny transient sizes.
-        # Wait a bit and retry so fit uses the final client geometry.
+        # On startup wx can briefly report tiny panel sizes.
+        # If we fit at that moment, the design appears tiny in the top-left.
+        # Retry shortly until layout stabilizes.
         if w < 120 or h < 120:
             if retries > 0:
                 wx.CallLater(30, self._try_fit_to_screen, retries - 1)
