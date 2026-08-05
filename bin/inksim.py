@@ -14,6 +14,21 @@ script_dir = Path(__file__).resolve().parent
 venv_dir = (script_dir / ".." / ".venv").resolve()
 APP_TITLE = "InkSim"
 
+
+def get_supported_input_wildcard():
+    """Build a wx file filter from the formats readable by pystitch."""
+    extensions = set()
+    for file_type in emb.EmbPattern.supported_formats():
+        if file_type.get("reader") is None:
+            continue
+        file_extensions = file_type.get("extensions", ())
+        if isinstance(file_extensions, str):
+            file_extensions = (file_extensions,)
+        extensions.update(ext.lstrip(".").lower() for ext in file_extensions)
+
+    patterns = ";".join(f"*.{ext}" for ext in sorted(extensions))
+    return f"Embroidery files ({patterns})|{patterns}|All files|*.*"
+
 def ensure_venv():
     # print(f"{sys.prefix=}"); print(f"{sys.base_prefix=}")
     if sys.prefix != sys.base_prefix: # we are in a virtual environment
@@ -166,7 +181,7 @@ def render_shaded_numba(buf, stitches, visible_count, zoom, pan_x, pan_y, use_gr
                                 buf[yi, xi, 2] = (buf[yi, xi, 2] + b)//2
 
 class ProgressBarPanel(wx.Panel):
-    """Interactive stitch timeline shown below the PES viewer.
+    """Interactive stitch timeline shown below the embroidery viewer.
 
     The panel uses the viewer as its source of truth. It displays the loaded
     stitch colors, overlays the currently visible portion, and lets the user
@@ -241,7 +256,7 @@ class ProgressBarPanel(wx.Panel):
 
         if total == 0:
             dc.SetTextForeground(wx.Colour(120, 120, 120))
-            dc.DrawText("No file loaded - open .pes", bar_x, bar_y + 22)
+            dc.DrawText("No file loaded - open an embroidery file", bar_x, bar_y + 22)
             return
 
         stitches = self.viewer.stitches_np
@@ -322,8 +337,8 @@ class ProgressBarPanel(wx.Panel):
             dc.DrawText(txt_right, bar_x + bar_w - tw, text_y)
 
 
-class PesViewerFastPanel(wx.Panel):
-    """Fast interactive PES preview with playback and viewport controls.
+class EmbroideryViewerPanel(wx.Panel):
+    """Fast interactive embroidery preview with playback and viewport controls.
 
     Stitch data is kept in a NumPy array and rendered into a bitmap by the
     Numba rasterizers above. This panel owns the viewer state: loaded design,
@@ -595,12 +610,12 @@ class PesViewerFastPanel(wx.Panel):
     def SetStepSize(self, size):
         self.step_size = max(1, size)
 
-    def LoadPes(self, path, fit_to_screen=True):
-        """Load a PES file and convert its stitches to renderable segments."""
+    def LoadDesign(self, path, fit_to_screen=True):
+        """Load an embroidery file into renderable stitch segments."""
         try:
             pattern = emb.read(path)
         except Exception as ex:
-            wx.MessageBox(f"Failed to load PES: {ex}", "Error")
+            wx.MessageBox(f"Failed to load embroidery file: {ex}", "Error")
             return False
         segs = []
         last_x = last_y = 0
@@ -675,7 +690,11 @@ class PesViewerFastPanel(wx.Panel):
                     14, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL
                 )
             )
-            dc.DrawText("Open .PES via File > Open or pass as cmd arg", 20, 20)
+            dc.DrawText(
+                "Open an embroidery file via File > Open or pass it as a command-line argument",
+                20,
+                20,
+            )
             dc.DrawText(
                 "H=help, Space=play/pause, Ctrl+Arrows=color, Alt+Arrows=1", 20, 45
             )
@@ -742,13 +761,13 @@ class Frame(wx.Frame):
     """Main InkSim window coordinating the viewer and playback controls."""
 
     def __init__(self, initial_file=None):
-        """Build the application window and optionally open a PES file."""
+        """Build the application window and optionally open a design file."""
         super().__init__(None, title=APP_TITLE, size=(1200, 980))
 
         # Create the main panel, viewer, and progress bar, and arrange them vertically.
         main_panel = wx.Panel(self)
         sizer = wx.BoxSizer(wx.VERTICAL)
-        self.viewer = PesViewerFastPanel(main_panel, None)
+        self.viewer = EmbroideryViewerPanel(main_panel, None)
         self.progress = ProgressBarPanel(main_panel, self.viewer)
         self.viewer.progress_bar = self.progress
         self.progress.Bind(wx.EVT_LEFT_UP, self.viewer.OnLeftUp)
@@ -762,7 +781,7 @@ class Frame(wx.Frame):
         menubar = wx.MenuBar()
 
         fileMenu = wx.Menu()
-        openItem = fileMenu.Append(wx.ID_OPEN, "Open .PES\tCtrl+O")
+        openItem = fileMenu.Append(wx.ID_OPEN, "Open embroidery file\tCtrl+O")
         fitItem = fileMenu.Append(wx.ID_ANY, "Fit to screen\tF")
         gridItem = fileMenu.AppendCheckItem(wx.ID_ANY, "Show 1cm grid\tG")
         gridItem.Check(True)
@@ -809,11 +828,11 @@ class Frame(wx.Frame):
             "Space=play/pause | Ctrl+Arrows=color | Alt+Arrows=1 | F=fit G=grid H=help"
         )
 
-        # Center the window, show it, and optionally load a PES file.
+        # Center the window, show it, and optionally load a design file.
         self.Centre()
         self.Show()
         if (initial_file and os.path.exists(initial_file)
-                and self.viewer.LoadPes(initial_file, fit_to_screen=True)):
+                and self.viewer.LoadDesign(initial_file, fit_to_screen=True)):
             total = self.viewer.stitches_np.shape[0]
             self.SetTitle(
                 f"{APP_TITLE} - {os.path.basename(initial_file)} - {total} sts"
@@ -832,14 +851,14 @@ class Frame(wx.Frame):
         self.viewer.Refresh()
 
     def OnOpen(self, e):
-        """Prompt for a PES file, load it, and update the window metadata."""
+        """Prompt for an embroidery file and update the window metadata."""
         dlg = wx.FileDialog(self,
-                            "Open PES",
-                            wildcard="PES (*.pes)|*.pes|All|*.*",
+                    "Open embroidery file",
+                    wildcard=get_supported_input_wildcard(),
                             style=wx.FD_OPEN)
         if dlg.ShowModal() == wx.ID_OK:
             path = dlg.GetPath()
-            if self.viewer.LoadPes(path, fit_to_screen=True):
+            if self.viewer.LoadDesign(path, fit_to_screen=True):
                 total = self.viewer.stitches_np.shape[0]
                 bw = self.viewer.bounds[2] - self.viewer.bounds[0]
                 bh = self.viewer.bounds[3] - self.viewer.bounds[1]
@@ -851,8 +870,8 @@ class Frame(wx.Frame):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=APP_TITLE)
-    parser.add_argument("pes_file", nargs="?", help="Input .pes file")
+    parser.add_argument("input_file", nargs="?", help="Input embroidery file")
     args=parser.parse_args()
     app=wx.App()
-    Frame(initial_file=args.pes_file)
+    Frame(initial_file=args.input_file)
     app.MainLoop()
