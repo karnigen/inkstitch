@@ -126,8 +126,11 @@ def render_shaded_numba(
     # Each segment is [x1, y1, x2, y2, r, g, b] in mm + base thread color.
     # We project mm -> screen pixels using zoom/pan and then rasterize.
     h, w, _ = buf.shape
-    hw = line_width * 0.5
-    lw_int = int(line_width)
+    # The configured width is measured at zoom 1.0; scale it with the
+    # world-to-screen transform so thread thickness follows the design.
+    effective_line_width = line_width * zoom
+    hw = effective_line_width * 0.5
+    lw_int = int(effective_line_width)
 
     for i in range(visible_count):
         # Convert segment endpoints from world space (mm) to screen pixels.
@@ -391,7 +394,7 @@ class EmbroideryViewerPanel(wx.Panel):
         self.pan_x, self.pan_y = 400, 300
         self.drag_start = None
         self.pan_start = (0, 0)
-        self.line_width = 2.0
+        self.line_width = 0.4
         self.dark_factor = 0.75
         self.light_factor = 0.45
         self.shading_step = 0.05
@@ -622,10 +625,10 @@ class EmbroideryViewerPanel(wx.Panel):
             self.ToggleAutoPlay(forward=self._last_dir > 0)
             return
         elif key in (ord("+"), ord("="), wx.WXK_NUMPAD_ADD):
-            self.line_width = min(10.0, self.line_width + 0.5)
+            self.line_width = min(1.0, self.line_width + 0.1)
             changed = True
         elif key in (ord("-"), ord("_"), wx.WXK_NUMPAD_SUBTRACT):
-            self.line_width = max(0.5, self.line_width - 0.5)
+            self.line_width = max(0.1, self.line_width - 0.1)
             changed = True
         elif key in (ord("["), ord("{"), ord("]"), ord("}")):
             shading_delta = self.shading_step
