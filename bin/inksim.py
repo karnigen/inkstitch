@@ -160,7 +160,8 @@ def render_shaded_numba(
     h, w, _ = buf.shape
     # The configured width is in mm; convert it to screen pixels with the
     # world-to-screen transform so thread thickness follows the design.
-    minimum_line_width = 2.0 if use_realistic else 1.0
+    # Realistic must keep same width as shaded to avoid thick blurry look.
+    minimum_line_width = 1.0
     effective_line_width = min(
         MAX_RENDER_LINE_WIDTH_PX,
         max(minimum_line_width, line_width * zoom),
@@ -192,23 +193,27 @@ def render_shaded_numba(
         normal_x = -dy / length
         normal_y = dx / length
 
-        # Precompute dark/light variants for pseudo-3D thread shading.
-        r_dark = int(r_base * dark_factor)
-        g_dark = int(g_base * dark_factor)
-        b_dark = int(b_base * dark_factor)
-        r_light = int(r_base + (255 - r_base) * light_factor)
-        g_light = int(g_base + (255 - g_base) * light_factor)
-        b_light = int(b_base + (255 - b_base) * light_factor)
+        # Precompute variants for thread shading.
+        # For realistic we want brighter variants, not dark mush.
+        r_dark = int(r_base * (0.75 + 0.25 * dark_factor))
+        g_dark = int(g_base * (0.75 + 0.25 * dark_factor))
+        b_dark = int(b_base * (0.75 + 0.25 * dark_factor))
+        r_light = int(r_base + (255 - r_base) * min(1.0, light_factor + 0.15))
+        g_light = int(g_base + (255 - g_base) * min(1.0, light_factor + 0.15))
+        b_light = int(b_base + (255 - b_base) * min(1.0, light_factor + 0.15))
+        # Brightened version for satin sheen
+        r_bright = int(min(255, r_base * 1.15 + 20))
+        g_bright = int(min(255, g_base * 1.15 + 20))
+        b_bright = int(min(255, b_base * 1.15 + 20))
 
-        # Sample at most once per screen pixel; cap long segments to keep
-        # extreme zoom levels responsive.
+        # Sample at most once per screen pixel; cap long segments for performance.
         steps = min(MAX_RENDER_STEPS, max(1, int(np.ceil(length))))
         for s in range(steps+1):
             t = s / steps
             x = x1 + dx * t
             y = y1 + dy * t
 
-            # Optional gradient along the segment to make stitches look less flat.
+            # Optional gradient along the segment to make stitches less flat.
             if use_shaded:
                 r = int(r_dark + (r_light - r_dark) * t)
                 g = int(g_dark + (g_light - g_dark) * t)
@@ -228,41 +233,57 @@ def render_shaded_numba(
                     buf[yi, xi, 2] = b
             else:
                 # Thick lines: draw a disk around each sampled point.
-                # Interior pixels are solid, rim pixels are blended for a softer edge.
-                render_radius = hw + 2 if use_realistic else hw
-                for oy in range(-lw_int-2 if use_realistic else -lw_int,
-                                lw_int+3 if use_realistic else lw_int+1):
-                    for ox in range(-lw_int-2 if use_realistic else -lw_int,
-                                    lw_int+3 if use_realistic else lw_int+1):
+                render_radius = hw
+                r_loop = lw_int + 1
+                for oy in range(-r_loop, r_loop + 1):
+                    for ox in range(-r_loop, r_loop + 1):
                         distance_squared = ox*ox + oy*oy
-                        if distance_squared > render_radius*render_radius + 1:
+                        if distance_squared > render_radius*render_radius + 0.5:
                             continue
                         xi = int(x + ox)
                         yi = int(y + oy)
                         if 0 <= xi < w and 0 <= yi < h:
                             if use_realistic:
+                                # Cylindrical shading - bright center, slightly darker edges
                                 normal_position = ox * normal_x + oy * normal_y
-                                if distance_squared > hw * hw:
-                                    buf[yi, xi, 0] = (buf[yi, xi, 0] * 7 + r_dark) // 8
-                                    buf[yi, xi, 1] = (buf[yi, xi, 1] * 7 + g_dark) // 8
-                                    buf[yi, xi, 2] = (buf[yi, xi, 2] * 7 + b_dark) // 8
+                                # -1 .. 1 across the thread width
+                                across = normal_position / hw if hw > 0.001 else 0.0
+                                if across < -1.0: across = -1.0
+                                if across >  1.0: across =  1.0
+                                across_abs = across if across >= 0 else -across
+
+                                # Smooth cylinder: 1 - across^2
+                                cyl = 1.0 - across_abs * across_abs
+                                # Mix dark edge -> bright center
+                                rr = int(r_dark + (r_bright - r_dark) * cyl)
+                                gg = int(g_dark + (g_bright - g_dark) * cyl)
+                                bb = int(b_dark + (b_bright - b_dark) * cyl)
+
+                                # Specular highlight - narrow strip offset from center
+                                # Light from top-left -> offset -0.30
+                                spec_center = -0.30
+                                spec_width = 0.28
+                                spec_dist = across - spec_center
+                                if spec_dist < 0: spec_dist = -spec_dist
+                                if spec_dist < spec_width:
+                                    spec = 1.0 - spec_dist / spec_width
+                                    spec = spec * spec  # sharper falloff
+                                    # Fade specular near stitch ends
+                                    along = t if t < 0.5 else 1.0 - t
+                                    if along < 0.15:
+                                        spec *= along / 0.15
+                                    # Add white specular
+                                    spec_strength = spec * 0.75
+                                    rr = int(rr + (255 - rr) * spec_strength)
+                                    gg = int(gg + (255 - gg) * spec_strength)
+                                    bb = int(bb + (255 - bb) * spec_strength)
+
+                                # Soft AA on edge only
+                                if distance_squared > (hw - 0.6)*(hw - 0.6):
+                                    buf[yi, xi, 0] = (buf[yi, xi, 0] + rr) // 2
+                                    buf[yi, xi, 1] = (buf[yi, xi, 1] + gg) // 2
+                                    buf[yi, xi, 2] = (buf[yi, xi, 2] + bb) // 2
                                 else:
-                                    across = abs(normal_position) / hw
-                                    across = max(0.0, min(1.0, across))
-                                    center_highlight = 1.0 - across * across
-                                    along = min(length * t, length * (1.0 - t))
-                                    end_fade = min(
-                                        1.0,
-                                        max(0.0, along) / REALISTIC_END_FADE_PX,
-                                    )
-                                    highlight = center_highlight * end_fade
-                                    edge_shadow = 1.0 - end_fade * (0.35 + 0.65 * center_highlight)
-                                    rr = int(r_dark + (r_light - r_dark) * highlight)
-                                    gg = int(g_dark + (g_light - g_dark) * highlight)
-                                    bb = int(b_dark + (b_light - b_dark) * highlight)
-                                    rr = int(rr * (1.0 - edge_shadow * 0.18))
-                                    gg = int(gg * (1.0 - edge_shadow * 0.18))
-                                    bb = int(bb * (1.0 - edge_shadow * 0.18))
                                     buf[yi, xi, 0] = rr
                                     buf[yi, xi, 1] = gg
                                     buf[yi, xi, 2] = bb
