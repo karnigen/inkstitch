@@ -1459,7 +1459,6 @@ class EmbroideryViewerPanel(wx.Panel):
                 <tr><td><b>+/-</b></td><td>Thread width</td></tr>
                 <tr><td><b>[/]</b></td><td>Dark shading</td></tr>
                 <tr><td><b>Shift+[/]</b></td><td>Light shading</td></tr>
-                <tr><td><b>Ctrl+Arrows</b></td><td>Adjust thread color HSL</td></tr>
             </table>
         </td>
         </tr></table>
@@ -2009,11 +2008,13 @@ class Frame(wx.Frame):
 
         fileMenu = wx.Menu()
         openItem = fileMenu.Append(wx.ID_OPEN, "Open embroidery file\tCtrl+O")
-        exportPrintItem = fileMenu.Append(wx.ID_ANY, "Export PNG for print...")
-        exportShadedItem = fileMenu.Append(
-            wx.ID_ANY, "Export shaded PNG for print..."
+        exportMenu = wx.Menu()
+        exportShadedItem = exportMenu.Append(
+            wx.ID_ANY, "Shaded PNG for print..."
         )
-        exportIconItem = fileMenu.Append(wx.ID_ANY, "Export preview PNG...")
+        exportIconItem = exportMenu.Append(wx.ID_ANY, "Preview PNG...")
+        exportPrintItem = exportMenu.Append(wx.ID_ANY, "Simple PNG for print...")
+        fileMenu.AppendSubMenu(exportMenu, "Export")
         centerItem = fileMenu.Append(wx.ID_ANY, "Center design\tC")
         fitItem = fileMenu.Append(wx.ID_ANY, "Fit design to window\tF")
         fullscreenItem = fileMenu.Append(wx.ID_ANY, "Fullscreen\tF11")
@@ -2375,12 +2376,12 @@ if __name__ == "__main__":
         help="Export a clean print PNG and exit",
     )
     parser.add_argument(
-        "--export-shaded-png",
+        "--export-shaded-png", "--png",
         metavar="PATH",
         help="Export a shaded print PNG and exit",
     )
     parser.add_argument(
-        "--export-icon",
+        "--export-icon", "--icon",
         metavar="PATH",
         help="Export a clean 256px preview PNG and exit",
     )
@@ -2391,13 +2392,13 @@ if __name__ == "__main__":
         help="DPI for --export-png (default: 300)",
     )
     parser.add_argument(
-        "--export-background",
+        "--export-background", "--bg",
         choices=("transparent", "white"),
         default="transparent",
         help="PNG background (default: transparent)",
     )
     parser.add_argument(
-        "--export-grid",
+        "--export-grid", "--grid",
         action="store_true",
         help="Add a 10 mm grid to exported PNG",
     )
