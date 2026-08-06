@@ -165,7 +165,7 @@ def render_shaded_numba(
     # The configured width is in mm; convert it to screen pixels with the
     # world-to-screen transform so thread thickness follows the design.
     # Realistic must keep same width as shaded to avoid thick blurry look.
-    minimum_line_width = 1.0
+    minimum_line_width = 1.5 if use_shaded else 1.0
     effective_line_width = min(
         MAX_RENDER_LINE_WIDTH_PX,
         max(minimum_line_width, line_width * zoom),
@@ -210,8 +210,13 @@ def render_shaded_numba(
         g_bright = int(min(255, g_base * 1.15 + 20))
         b_bright = int(min(255, b_base * 1.15 + 20))
 
-        # Sample at most once per screen pixel; cap long segments for performance.
-        steps = min(MAX_RENDER_STEPS, max(1, int(np.ceil(length))))
+        # Oversample short projected stitches so rounded pixel coordinates do
+        # not leave gaps while the line width crosses the one-pixel boundary.
+        sample_factor = 1.5 if length < 512.0 else 1.0
+        steps = min(
+            MAX_RENDER_STEPS,
+            max(1, int(np.ceil(length * sample_factor))),
+        )
         for s in range(steps+1):
             t = s / steps
             x = x1 + dx * t
@@ -436,7 +441,8 @@ def render_export_image(stitches, bounds, width, height, line_width, dpi=None,
             if 0 <= y < height:
                 draw.line((0, y, width, y), fill=grid_color, width=1)
 
-    stroke_width = max(1, round(max(line_width, 0.7) * zoom))
+    stroke_width = max(2, round(max(line_width, 0.7) * zoom))
+    cap_radius = max(1, stroke_width // 2)
     for x1, y1, x2, y2, red, green, blue in stitches:
         start = (x1 * zoom + offset_x, y1 * zoom + offset_y)
         end = (x2 * zoom + offset_x, y2 * zoom + offset_y)
@@ -445,6 +451,24 @@ def render_export_image(stitches, bounds, width, height, line_width, dpi=None,
                 (round(start[0]), round(start[1]), round(end[0]), round(end[1])),
                 fill=(int(red), int(green), int(blue), 255),
                 width=stroke_width,
+            )
+            draw.ellipse(
+                (
+                    round(start[0]) - cap_radius,
+                    round(start[1]) - cap_radius,
+                    round(start[0]) + cap_radius,
+                    round(start[1]) + cap_radius,
+                ),
+                fill=(int(red), int(green), int(blue), 255),
+            )
+            draw.ellipse(
+                (
+                    round(end[0]) - cap_radius,
+                    round(end[1]) - cap_radius,
+                    round(end[0]) + cap_radius,
+                    round(end[1]) + cap_radius,
+                ),
+                fill=(int(red), int(green), int(blue), 255),
             )
             continue
         dark = (
