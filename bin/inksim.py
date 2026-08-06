@@ -1376,7 +1376,9 @@ class Frame(wx.Frame):
         gridItem = fileMenu.AppendCheckItem(wx.ID_ANY, "Show 1cm grid\tG")
         gridItem.Check(True)
         helpItem = fileMenu.Append(wx.ID_ANY, "Help\tH")
-        menubar.Append(fileMenu, "File")
+        fileMenu.AppendSeparator()
+        quitItem = fileMenu.Append(wx.ID_EXIT, "Quit\tCtrl+Q")
+        menubar.Append(fileMenu, "&File")
 
         playbackMenu = wx.Menu()
         s1 = playbackMenu.AppendRadioItem(wx.ID_ANY, "Step 1 (Alt+Arrows)")
@@ -1390,8 +1392,26 @@ class Frame(wx.Frame):
         playItem = playbackMenu.Append(wx.ID_ANY, "Play/Pause\tSpace")
         nextCol = playbackMenu.Append(wx.ID_ANY, "Next color\tCtrl+Right")
         prevCol = playbackMenu.Append(wx.ID_ANY, "Prev color\tCtrl+Left")
-        menubar.Append(playbackMenu, "Playback")
+        menubar.Append(playbackMenu, "&Playback")
         self.SetMenuBar(menubar)
+
+        # Keep references for Alt+F / Alt+P handling
+        self.menubar = menubar
+        self.fileMenu = fileMenu
+        self.playbackMenu = playbackMenu
+
+        # Global accelerators
+        # Alt+F / Alt+P are handled by mnemonics in menu titles (&File / &Playback)
+        # - wxWidgets automatically exposes them as Alt+F and Alt+P.
+        # Ctrl+Q for Quit is added explicitly via AcceleratorTable.
+        accel_tbl = wx.AcceleratorTable([
+            (wx.ACCEL_CTRL, ord('Q'), quitItem.GetId()),
+        ])
+        self.SetAcceleratorTable(accel_tbl)
+
+        # Ensure Alt+F and Alt+P work even when EmbroideryViewerPanel has focus
+        # (it has its own key handler). CHAR_HOOK on the frame intercepts keys earlier.
+        self.Bind(wx.EVT_CHAR_HOOK, self.OnCharHook)
 
         # Bind menu items to their handlers.
         self.Bind(wx.EVT_CLOSE, self.OnClose)
@@ -1401,6 +1421,7 @@ class Frame(wx.Frame):
         self.Bind(wx.EVT_MENU, lambda e: self.ToggleFullScreen(), fullscreenItem)
         self.Bind(wx.EVT_MENU, self.OnToggleGrid, gridItem)
         self.Bind(wx.EVT_MENU, lambda e: self.viewer.ShowHelp(), helpItem)
+        self.Bind(wx.EVT_MENU, lambda e: self.Close(), quitItem)
         self.Bind(wx.EVT_MENU, lambda e: self.viewer.SetStepSize(1), s1)
         self.Bind(wx.EVT_MENU, lambda e: self.viewer.SetStepSize(10), s10)
         self.Bind(wx.EVT_MENU, lambda e: self.viewer.SetStepSize(50), s50)
@@ -1499,6 +1520,39 @@ class Frame(wx.Frame):
         self.viewer.need_redraw = True
         self.viewer.Refresh()
         self.progress.Refresh()
+
+    def OnCharHook(self, e):
+        """Global keyboard shortcuts for menu.
+
+        - Ctrl+Q -> Quit
+        - Alt+F -> open File menu
+        - Alt+P -> open Playback menu
+        """
+        kc = e.GetKeyCode()
+        # Ctrl+Q
+        if e.ControlDown() and kc == ord('Q'):
+            self.Close()
+            return
+        # Alt+F / Alt+P - works even when viewer has focus
+        if e.AltDown() and not e.ControlDown():
+            if kc == ord('F'):
+                # Try to activate via PopupMenu as fallback
+                try:
+                    # On GTK the menu opens near the menubar
+                    pos = self.ClientToScreen((5, 5))
+                    self.PopupMenu(self.fileMenu, self.ScreenToClient(pos))
+                except Exception:
+                    pass
+                return
+            if kc == ord('P'):
+                try:
+                    # Approximate position of second menu
+                    pos = self.ClientToScreen((80, 5))
+                    self.PopupMenu(self.playbackMenu, self.ScreenToClient(pos))
+                except Exception:
+                    pass
+                return
+        e.Skip()
 
     def OnClose(self, e):
         """Stop playback before allowing the frame to close."""
