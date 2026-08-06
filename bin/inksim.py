@@ -209,6 +209,157 @@ def render_fabric_numba(buf, zoom):
 
 
 @numba.njit
+def render_realistic_numba(
+    buf,
+    stitches,
+    visible_count,
+    zoom,
+    pan_x,
+    pan_y,
+    line_width,
+    dark_factor,
+    light_factor,
+):
+    """Render stitches as lit cylindrical threads with soft cast shadows."""
+    height, width, _ = buf.shape
+    thread_radius = max(0.75, line_width * zoom * 0.5)
+    margin = int(np.ceil(thread_radius + 4.0))
+
+    light_x, light_y, light_z = -0.4, -0.4, 0.82
+    light_length = np.sqrt(
+        light_x * light_x + light_y * light_y + light_z * light_z
+    )
+    light_x /= light_length
+    light_y /= light_length
+    light_z /= light_length
+    shadow_dx = int(np.round(-light_x * thread_radius * 1.4))
+    shadow_dy = int(np.round(-light_y * thread_radius * 1.4))
+    half_x = light_x
+    half_y = light_y
+    half_z = light_z + 1.0
+    half_length = np.sqrt(
+        half_x * half_x + half_y * half_y + half_z * half_z
+    )
+    half_x /= half_length
+    half_y /= half_length
+    half_z /= half_length
+
+    for i in range(visible_count):
+        x1 = stitches[i, 0] * zoom + pan_x
+        y1 = stitches[i, 1] * zoom + pan_y
+        x2 = stitches[i, 2] * zoom + pan_x
+        y2 = stitches[i, 3] * zoom + pan_y
+        dx = x2 - x1
+        dy = y2 - y1
+        length = np.sqrt(dx * dx + dy * dy)
+        if length <= 0.1:
+            continue
+        tx = dx / length
+        ty = dy / length
+        nx = -ty
+        ny = tx
+
+        min_x = max(0, int(np.floor(min(x1, x2) - margin + shadow_dx)))
+        max_x = min(width - 1, int(np.ceil(max(x1, x2) + margin + shadow_dx)))
+        min_y = max(0, int(np.floor(min(y1, y2) - margin + shadow_dy)))
+        max_y = min(height - 1, int(np.ceil(max(y1, y2) + margin + shadow_dy)))
+        for py in range(min_y, max_y + 1):
+            for px in range(min_x, max_x + 1):
+                vx = (px - shadow_dx) - x1
+                vy = (py - shadow_dy) - y1
+                along = vx * tx + vy * ty
+                if along < 0.0:
+                    distance = np.sqrt(vx * vx + vy * vy)
+                elif along > length:
+                    end_x = vx - dx
+                    end_y = vy - dy
+                    distance = np.sqrt(end_x * end_x + end_y * end_y)
+                else:
+                    distance = abs(vx * nx + vy * ny)
+                if distance <= thread_radius + 1.5:
+                    shadow_alpha = 1.0 - distance / (thread_radius + 1.5)
+                    shadow_alpha = shadow_alpha * shadow_alpha * 0.28
+                    buf[py, px, 0] = int(buf[py, px, 0] * (1.0 - shadow_alpha))
+                    buf[py, px, 1] = int(buf[py, px, 1] * (1.0 - shadow_alpha))
+                    buf[py, px, 2] = int(buf[py, px, 2] * (1.0 - shadow_alpha))
+
+        r_base = int(stitches[i, 4])
+        g_base = int(stitches[i, 5])
+        b_base = int(stitches[i, 6])
+        r_dark = r_base * (0.75 + 0.25 * dark_factor)
+        g_dark = g_base * (0.75 + 0.25 * dark_factor)
+        b_dark = b_base * (0.75 + 0.25 * dark_factor)
+        r_light = r_base + (255 - r_base) * min(1.0, light_factor + 0.15)
+        g_light = g_base + (255 - g_base) * min(1.0, light_factor + 0.15)
+        b_light = b_base + (255 - b_base) * min(1.0, light_factor + 0.15)
+        r_bright = min(255.0, r_base * 1.15 + 20.0)
+        g_bright = min(255.0, g_base * 1.15 + 20.0)
+        b_bright = min(255.0, b_base * 1.15 + 20.0)
+
+        min_x = max(0, int(np.floor(min(x1, x2) - margin)))
+        max_x = min(width - 1, int(np.ceil(max(x1, x2) + margin)))
+        min_y = max(0, int(np.floor(min(y1, y2) - margin)))
+        max_y = min(height - 1, int(np.ceil(max(y1, y2) + margin)))
+        for py in range(min_y, max_y + 1):
+            for px in range(min_x, max_x + 1):
+                vx = px - x1
+                vy = py - y1
+                along = vx * tx + vy * ty
+                if along < 0.0:
+                    distance = np.sqrt(vx * vx + vy * vy)
+                    along_pos = 0.0
+                elif along > length:
+                    end_x = vx - dx
+                    end_y = vy - dy
+                    distance = np.sqrt(end_x * end_x + end_y * end_y)
+                    along_pos = length
+                else:
+                    distance = abs(vx * nx + vy * ny)
+                    along_pos = along
+                if distance > thread_radius + 0.5:
+                    continue
+
+                alpha = min(1.0, max(0.0, thread_radius + 0.5 - distance))
+                across = max(-1.0, min(1.0, (vx * nx + vy * ny) / thread_radius))
+                cylinder = np.sqrt(max(0.0, 1.0 - across * across))
+                twist = np.sin((along_pos / max(1.0, thread_radius * 4.0)) * 2.0 * np.pi) * 0.10
+                surface_x = nx * across + tx * twist
+                surface_y = ny * across + ty * twist
+                surface_z = cylinder
+                surface_length = np.sqrt(
+                    surface_x * surface_x
+                    + surface_y * surface_y
+                    + surface_z * surface_z
+                )
+                surface_x /= surface_length
+                surface_y /= surface_length
+                surface_z /= surface_length
+                diffuse = max(
+                    0.0,
+                    surface_x * light_x
+                    + surface_y * light_y
+                    + surface_z * light_z,
+                )
+                specular = max(
+                    0.0,
+                    surface_x * half_x
+                    + surface_y * half_y
+                    + surface_z * half_z,
+                ) ** 24 * 0.65
+                edge_light = 0.35 + 0.65 * cylinder
+                intensity = (0.25 + 0.75 * diffuse) * edge_light
+                rr = min(255.0, r_dark + (r_light - r_dark) * intensity + specular * 255.0)
+                gg = min(255.0, g_dark + (g_light - g_dark) * intensity + specular * 255.0)
+                bb = min(255.0, b_dark + (b_light - b_dark) * intensity + specular * 255.0)
+                rr = rr * 0.85 + r_bright * 0.15
+                gg = gg * 0.85 + g_bright * 0.15
+                bb = bb * 0.85 + b_bright * 0.15
+                buf[py, px, 0] = int(buf[py, px, 0] * (1.0 - alpha) + rr * alpha)
+                buf[py, px, 1] = int(buf[py, px, 1] * (1.0 - alpha) + gg * alpha)
+                buf[py, px, 2] = int(buf[py, px, 2] * (1.0 - alpha) + bb * alpha)
+
+
+@numba.njit
 def render_shaded_numba(
     buf,
     stitches,
@@ -596,6 +747,7 @@ class EmbroideryOpenDialog(wx.Dialog):
     def __init__(self, parent, initial_directory, selected_file=None):
         super().__init__(parent, title="Open embroidery file", size=(1100, 720))
         self.selected_path = None
+        self._modal_result = None
         self.current_directory = Path(initial_directory or Path.cwd()).resolve()
         self.initial_file = Path(selected_file).resolve() if selected_file else None
         self.extensions = get_supported_input_extensions()
@@ -683,10 +835,17 @@ class EmbroideryOpenDialog(wx.Dialog):
     def OnOpen(self, event):
         """Accept the selected file."""
         if self.selected_path:
-            self.EndModal(wx.ID_OK)
+            self._EndModalOnce(wx.ID_OK)
 
     def OnCancel(self, event):
-        self.EndModal(wx.ID_CANCEL)
+        self._EndModalOnce(wx.ID_CANCEL)
+
+    def _EndModalOnce(self, result):
+        """Finish the modal dialog only once while it is actually modal."""
+        if self._modal_result is not None or not self.IsModal():
+            return
+        self._modal_result = result
+        self.EndModal(result)
 
     def OnDirectoryEnter(self, event):
         self.SetDirectory(self.directory_text.GetValue())
@@ -1843,19 +2002,31 @@ class EmbroideryViewerPanel(wx.Panel):
             render_grid_numba(buf, self.zoom, self.pan_x, self.pan_y)
         if self.show_stitches and self.stitches_np.shape[
                 0] > 0 and self.visible_count > 0:
-            render_shaded_numba(
-                buf,
-                self.stitches_np,
-                self.visible_count,
-                self.zoom,
-                self.pan_x,
-                self.pan_y,
-                use_shaded,
-                self.line_width,
-                self.dark_factor,
-                self.light_factor,
-                use_realistic,
-            )
+            if use_realistic:
+                render_realistic_numba(
+                    buf,
+                    self.stitches_np,
+                    self.visible_count,
+                    self.zoom,
+                    self.pan_x,
+                    self.pan_y,
+                    self.line_width,
+                    self.dark_factor,
+                    self.light_factor,
+                )
+            else:
+                render_shaded_numba(
+                    buf,
+                    self.stitches_np,
+                    self.visible_count,
+                    self.zoom,
+                    self.pan_x,
+                    self.pan_y,
+                    use_shaded,
+                    self.line_width,
+                    self.dark_factor,
+                    self.light_factor,
+                )
         if self.show_density and len(self.stitch_points_np) > 0:
             render_density_numba(
                 buf,
