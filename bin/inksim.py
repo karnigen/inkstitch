@@ -1328,6 +1328,9 @@ class EmbroideryViewerPanel(wx.Panel):
                 return
         elif key in (ord("G"), ord("g")) and not is_alt and not is_ctrl:
             self.show_grid = not self.show_grid
+            frame = wx.GetTopLevelParent(self)
+            if hasattr(frame, "gridItem"):
+                frame.gridItem.Check(self.show_grid)
             changed = True
         elif key in (ord("J"), ord("j")) and not is_alt and not is_ctrl:
             if not self.show_jumps:
@@ -1349,6 +1352,9 @@ class EmbroideryViewerPanel(wx.Panel):
             changed = True
         elif key in (ord("R"), ord("r")) and not is_alt and not is_ctrl:
             self.show_realistic = not self.show_realistic
+            frame = wx.GetTopLevelParent(self)
+            if hasattr(frame, "realisticItem"):
+                frame.realisticItem.Check(self.show_realistic)
             changed = True
         elif key in (ord("N"), ord("n")) and not is_alt and not is_ctrl:
             self.show_needle = not self.show_needle
@@ -1972,6 +1978,8 @@ class Frame(wx.Frame):
         self.menubar = menubar
         self.fileMenu = fileMenu
         self.playbackMenu = playbackMenu
+        self.gridItem = gridItem
+        self.realisticItem = realisticItem
 
         # Global accelerators
         # Alt+F / Alt+P are handled by mnemonics in menu titles (&File / &Playback).
