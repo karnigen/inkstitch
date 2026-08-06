@@ -533,8 +533,8 @@ class EmbroideryViewerPanel(wx.Panel):
         self.visible_count = 0
         self.step_size = 10
         self.show_grid = True
+        self.show_stitches = True
         self.show_density = False
-        self.density_only = False
         self.show_jumps = False
         self.risky_jumps_only = False
         self.show_needle = True
@@ -926,16 +926,12 @@ class EmbroideryViewerPanel(wx.Panel):
                 self.risky_jumps_only = False
             changed = True
         elif key in (ord("X"), ord("x")) and not is_alt and not is_ctrl:
-            if not self.show_density:
-                self.show_density = True
-                self.density_only = False
-            elif not self.density_only:
-                self.density_only = True
-            else:
-                self.show_density = False
-                self.density_only = False
+            self.show_density = not self.show_density
             if self.show_density and not self.density_ready:
                 self.CalculateStitchDensity()
+            changed = True
+        elif key in (ord("V"), ord("v")) and not is_alt and not is_ctrl:
+            self.show_stitches = not self.show_stitches
             changed = True
         elif key in (ord("N"), ord("n")) and not is_alt and not is_ctrl:
             self.show_needle = not self.show_needle
@@ -994,6 +990,7 @@ class EmbroideryViewerPanel(wx.Panel):
             "  F                Fit design to window\n"
             "  F11              Toggle fullscreen\n"
             "  1                Show design at physical 1:1 size\n"
+            "  V                Toggle embroidery visibility\n"
             "  G                Toggle grid\n"
             "  H                Show this help\n"
             "  I                Show viewer settings\n\n"
@@ -1015,11 +1012,7 @@ class EmbroideryViewerPanel(wx.Panel):
         min_x, min_y, max_x, max_y = self.bounds
         width = max_x - min_x
         height = max_y - min_y
-        density_mode = (
-            "density only" if self.density_only
-            else "overlay" if self.show_density
-            else "off"
-        )
+        density_mode = "on" if self.show_density else "off"
         jump_mode = (
             "risky only" if self.risky_jumps_only
             else "all" if self.show_jumps
@@ -1035,6 +1028,7 @@ class EmbroideryViewerPanel(wx.Panel):
             f"  Zoom: {self.zoom:.3f}\n"
             f"  Pan: {self.pan_x:.1f}, {self.pan_y:.1f} px\n"
             f"  Grid: {'on' if self.show_grid else 'off'}\n"
+            f"  Embroidery: {'on' if self.show_stitches else 'off'}\n"
             f"  Jump paths: {jump_mode}\n"
             f"  Density map: {density_mode}\n"
             f"  Density radius: {DENSITY_RADIUS_MM:.1f} mm\n"
@@ -1235,11 +1229,7 @@ class EmbroideryViewerPanel(wx.Panel):
         buf = np.full((h, w, 3), 255, dtype=np.uint8)
         if self.show_grid:
             render_grid_numba(buf, self.zoom, self.pan_x, self.pan_y)
-        if (
-            not self.density_only
-            and self.stitches_np.shape[0] > 0
-            and self.visible_count > 0
-        ):
+        if self.show_stitches and self.stitches_np.shape[0] > 0 and self.visible_count > 0:
             render_shaded_numba(
                 buf,
                 self.stitches_np,
@@ -1291,7 +1281,7 @@ class EmbroideryViewerPanel(wx.Panel):
 
     def DrawNeedleOverlay(self, dc):
         """Draw the current needle position above the cached stitch bitmap."""
-        if not self.show_needle or self.stitches_np.shape[0] == 0:
+        if not self.show_stitches or not self.show_needle or self.stitches_np.shape[0] == 0:
             return
         if self.visible_count > 0:
             stitch = self.stitches_np[self.visible_count - 1]
