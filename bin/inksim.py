@@ -727,8 +727,6 @@ class EmbroideryViewerPanel(wx.Panel):
     def JumpToCommand(self, direction):
         """Move to the nearest recorded JUMP, TRIM, or color-change event."""
         positions = sorted(self.command_events)
-        if not positions:
-            return False
         current = self.visible_count
         if direction > 0:
             targets = (position for position in positions if position > current)
@@ -738,7 +736,9 @@ class EmbroideryViewerPanel(wx.Panel):
             )
         target = next(targets, None)
         if target is None:
-            return False
+            target = self.stitches_np.shape[0] if direction > 0 else 0
+            if target == current:
+                return False
         self.visible_count = target
         return True
 
