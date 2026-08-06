@@ -740,6 +740,54 @@ class EmbroideryViewerPanel(wx.Panel):
         self.visible_count = target
         return True
 
+    def RotateDesign(self, quarter_turns):
+        """Rotate the loaded design by quarter turns around its center."""
+        if self.stitches_np.shape[0] == 0:
+            return
+
+        min_x, min_y, max_x, max_y = self.bounds
+        center_x = (min_x + max_x) / 2
+        center_y = (min_y + max_y) / 2
+        turns = quarter_turns % 4
+        if turns == 0:
+            return
+
+        def rotate_coordinates(coordinates):
+            relative_x = coordinates[:, 0] - center_x
+            relative_y = coordinates[:, 1] - center_y
+            if turns == 1:
+                coordinates[:, 0] = center_x - relative_y
+                coordinates[:, 1] = center_y + relative_x
+            elif turns == 2:
+                coordinates[:, 0] = center_x - relative_x
+                coordinates[:, 1] = center_y - relative_y
+            else:
+                coordinates[:, 0] = center_x + relative_y
+                coordinates[:, 1] = center_y - relative_x
+
+        rotate_coordinates(self.stitches_np[:, 0:2])
+        rotate_coordinates(self.stitches_np[:, 2:4])
+        rotate_coordinates(self.stitch_points_np)
+        if self.jump_segments:
+            jump_coordinates = np.asarray(self.jump_segments, dtype=np.float32)
+            rotate_coordinates(jump_coordinates[:, 0:2])
+            rotate_coordinates(jump_coordinates[:, 2:4])
+            self.jump_segments = jump_coordinates.tolist()
+
+        rotated_corners = np.array(
+            [[min_x, min_y], [min_x, max_y], [max_x, min_y], [max_x, max_y]],
+            dtype=np.float32,
+        )
+        rotate_coordinates(rotated_corners)
+        self.bounds = (
+            float(rotated_corners[:, 0].min()),
+            float(rotated_corners[:, 1].min()),
+            float(rotated_corners[:, 0].max()),
+            float(rotated_corners[:, 1].max()),
+        )
+        self.need_redraw = True
+        self.CenterDesign()
+
     def OnKeyDown(self, e):
         """Handle playback, navigation, display, and view shortcut keys."""
         now = time.time()
@@ -1391,6 +1439,9 @@ class Frame(wx.Frame):
         gridItem.Check(True)
         helpItem = fileMenu.Append(wx.ID_ANY, "Help\tH")
         fileMenu.AppendSeparator()
+        rotateLeftItem = fileMenu.Append(wx.ID_ANY, "Rotate left 90 deg")
+        rotateRightItem = fileMenu.Append(wx.ID_ANY, "Rotate right 90 deg")
+        fileMenu.AppendSeparator()
         quitItem = fileMenu.Append(wx.ID_EXIT, "Quit\tCtrl+Q")
         menubar.Append(fileMenu, "&File")
 
@@ -1435,6 +1486,8 @@ class Frame(wx.Frame):
         self.Bind(wx.EVT_MENU, lambda e: self.ToggleFullScreen(), fullscreenItem)
         self.Bind(wx.EVT_MENU, self.OnToggleGrid, gridItem)
         self.Bind(wx.EVT_MENU, lambda e: self.viewer.ShowHelp(), helpItem)
+        self.Bind(wx.EVT_MENU, lambda e: self.viewer.RotateDesign(-1), rotateLeftItem)
+        self.Bind(wx.EVT_MENU, lambda e: self.viewer.RotateDesign(1), rotateRightItem)
         self.Bind(wx.EVT_MENU, lambda e: self.Close(), quitItem)
         self.Bind(wx.EVT_MENU, lambda e: self.viewer.SetStepSize(1), s1)
         self.Bind(wx.EVT_MENU, lambda e: self.viewer.SetStepSize(10), s10)
