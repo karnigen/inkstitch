@@ -1131,9 +1131,6 @@ class EmbroideryViewerPanel(wx.Panel):
                 last_x, last_y = x, y
                 continue
             if hasattr(emb, "TRIM") and cmd == emb.TRIM:
-                for jump_index in jump_run_indices:
-                    self.jump_segments[jump_index][4] = 0
-                jump_run_indices = []
                 event_position = len(segs)
                 self.command_events.setdefault(event_position, []).append("TRIM")
                 continue
