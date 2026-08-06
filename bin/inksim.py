@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 
-# InkSim - interactive embroidery simulator and preview renderer.
-# Copyright (c) 2026 Ink/Stitch authors
-
-# Dual run: system python3 or .venv python
-
-
 from pathlib import Path
 import sys
 import os
 import argparse
+
+#-------------------------------------------------------------------
+# Dual run: system python3 or .venv python
 
 script_dir = Path(__file__).resolve().parent
 
@@ -159,7 +156,12 @@ def render_shaded_numba(
     use_realistic=False,
 ):
     # Draw visible stitch segments into the RGB buffer.
+    # Each segment is [x1, y1, x2, y2, r, g, b] in mm + base thread color.
+    # We project mm -> screen pixels using zoom/pan and then rasterize.
     h, w, _ = buf.shape
+    # The configured width is in mm; convert it to screen pixels with the
+    # world-to-screen transform so thread thickness follows the design.
+    # Realistic must keep same width as shaded to avoid thick blurry look.
     minimum_line_width = 1.0
     effective_line_width = min(
         MAX_RENDER_LINE_WIDTH_PX,
@@ -168,236 +170,132 @@ def render_shaded_numba(
     hw = effective_line_width * 0.5
     lw_int = max(1, int(np.ceil(effective_line_width)))
 
-    light_x = -0.5
-    light_y = -0.8660254
-
-    # For realistic: puncture config
-    puncture_radius = 1
-    if hw > 2.5:
-        puncture_radius = 2
-    last_puncture_x = -100000
-    last_puncture_y = -100000
-
     for i in range(visible_count):
+        # Convert segment endpoints from world space (mm) to screen pixels.
         x1 = stitches[i,0] * zoom + pan_x
         y1 = stitches[i,1] * zoom + pan_y
         x2 = stitches[i,2] * zoom + pan_x
         y2 = stitches[i,3] * zoom + pan_y
 
+        # Get base thread color for this segment.
         r_base = int(stitches[i, 4])
         g_base = int(stitches[i, 5])
         b_base = int(stitches[i, 6])
 
-        if (x1 < -200 and x2 < -200) or (x1 > w+200 and x2 > w+200):
-            # Still need to handle puncture skipping for invisible stitches
-            pass
-        elif (y1 < -200 and y2 < -200) or (y1 > h+200 and y2 > h+200):
-            pass
-        else:
-            dx = x2 - x1
-            dy = y2 - y1
-            length = np.sqrt(dx*dx + dy*dy)
-            if length > 0:
-                tangent_x = dx / length
-                tangent_y = dy / length
-                normal_x = -tangent_y
-                normal_y = tangent_x
-                if normal_x * light_x + normal_y * light_y < 0.0:
-                    normal_x = -normal_x
-                    normal_y = -normal_y
-                dot_tl = tangent_x * light_x + tangent_y * light_y
-                perp_sq = 1.0 - dot_tl * dot_tl
-                if perp_sq < 0.0: perp_sq = 0.0
-                perp_factor = np.sqrt(perp_sq)
+        # Cheap reject: ignore segments completely far outside the viewport.
+        if (x1 < -200 and x2 < -200) or (x1 > w+200 and x2 > w+200): continue
+        if (y1 < -200 and y2 < -200) or (y1 > h+200 and y2 > h+200): continue
 
-                r_dark = int(r_base * (0.85 + 0.15 * dark_factor))
-                g_dark = int(g_base * (0.85 + 0.15 * dark_factor))
-                b_dark = int(b_base * (0.85 + 0.15 * dark_factor))
-                r_light = int(r_base + (255 - r_base) * min(1.0, light_factor + 0.10))
-                g_light = int(g_base + (255 - g_base) * min(1.0, light_factor + 0.10))
-                b_light = int(b_base + (255 - b_base) * min(1.0, light_factor + 0.10))
-                r_bright = int(min(255, r_base * 1.08 + 12))
-                g_bright = int(min(255, g_base * 1.08 + 12))
-                b_bright = int(min(255, b_base * 1.08 + 12))
+        # Compute the segment length in pixels and sample points along it.
+        dx = x2 - x1
+        dy = y2 - y1
+        length = np.sqrt(dx*dx + dy*dy)
+        if length <= 0: continue
+        normal_x = -dy / length
+        normal_y = dx / length
 
-                steps = min(MAX_RENDER_STEPS, max(1, int(np.ceil(length))))
-                for s in range(steps+1):
-                    t = s / steps
-                    x = x1 + dx * t
-                    y = y1 + dy * t
+        # Precompute variants for thread shading.
+        # For realistic we want brighter variants, not dark mush.
+        r_dark = int(r_base * (0.75 + 0.25 * dark_factor))
+        g_dark = int(g_base * (0.75 + 0.25 * dark_factor))
+        b_dark = int(b_base * (0.75 + 0.25 * dark_factor))
+        r_light = int(r_base + (255 - r_base) * min(1.0, light_factor + 0.15))
+        g_light = int(g_base + (255 - g_base) * min(1.0, light_factor + 0.15))
+        b_light = int(b_base + (255 - b_base) * min(1.0, light_factor + 0.15))
+        # Brightened version for satin sheen
+        r_bright = int(min(255, r_base * 1.15 + 20))
+        g_bright = int(min(255, g_base * 1.15 + 20))
+        b_bright = int(min(255, b_base * 1.15 + 20))
 
-                    if use_shaded:
-                        r = int(r_dark + (r_light - r_dark) * t)
-                        g = int(g_dark + (g_light - g_dark) * t)
-                        b = int(b_dark + (b_light - b_dark) * t)
-                    else:
-                        r = r_base
-                        g = g_base
-                        b = b_base
+        # Sample at most once per screen pixel; cap long segments for performance.
+        steps = min(MAX_RENDER_STEPS, max(1, int(np.ceil(length))))
+        for s in range(steps+1):
+            t = s / steps
+            x = x1 + dx * t
+            y = y1 + dy * t
 
-                    if lw_int <= 1 and not use_realistic:
-                        xi = int(x)
-                        yi = int(y)
-                        if 0 <= xi < w and 0 <= yi < h:
-                            buf[yi, xi, 0] = r
-                            buf[yi, xi, 1] = g
-                            buf[yi, xi, 2] = b
-                    else:
-                        render_radius = hw
-                        r_loop = lw_int + 1
-                        for oy in range(-r_loop, r_loop + 1):
-                            for ox in range(-r_loop, r_loop + 1):
-                                distance_squared = ox*ox + oy*oy
-                                if distance_squared > render_radius*render_radius + 0.5:
-                                    continue
-                                xi = int(x + ox)
-                                yi = int(y + oy)
-                                if 0 <= xi < w and 0 <= yi < h:
-                                    if use_realistic:
-                                        normal_position = ox * normal_x + oy * normal_y
-                                        across = normal_position / hw if hw > 0.001 else 0.0
-                                        if across < -1.0: across = -1.0
-                                        if across >  1.0: across =  1.0
-                                        across_abs = across if across >= 0 else -across
-                                        cyl = 1.0 - across_abs * across_abs * 0.7
-                                        rr = int(r_dark + (r_bright - r_dark) * cyl)
-                                        gg = int(g_dark + (g_bright - g_dark) * cyl)
-                                        bb = int(b_dark + (b_bright - b_dark) * cyl)
+            # Optional gradient along the segment to make stitches less flat.
+            if use_shaded:
+                r = int(r_dark + (r_light - r_dark) * t)
+                g = int(g_dark + (g_light - g_dark) * t)
+                b = int(b_dark + (b_light - b_dark) * t)
+            else:
+                r = r_base
+                g = g_base
+                b = b_base
 
-                                        zoom_fade = (hw - 1.2) / 1.3
-                                        if zoom_fade < 0.0: zoom_fade = 0.0
-                                        if zoom_fade > 1.0: zoom_fade = 1.0
-                                        if zoom_fade > 0.01:
-                                            spec_center = 0.25
-                                            spec_width = 0.50
-                                            spec_dist = across - spec_center
-                                            if spec_dist < 0: spec_dist = -spec_dist
-                                            if spec_dist < spec_width:
-                                                spec = 1.0 - spec_dist / spec_width
-                                                spec = spec * spec
-                                                along = t if t < 0.5 else 1.0 - t
-                                                if along < 0.20:
-                                                    spec *= along / 0.20
-                                                angle_mod = 0.40 + 0.60 * perp_factor
-                                                spec *= angle_mod * zoom_fade
-                                                spec_strength = spec * 0.32
-                                                hl_r = int((rr + r_light + 255) * 0.33 + 10)
-                                                hl_g = int((gg + g_light + 255) * 0.33 + 10)
-                                                hl_b = int((bb + b_light + 255) * 0.33 + 10)
-                                                if hl_r > 255: hl_r = 255
-                                                if hl_g > 255: hl_g = 255
-                                                if hl_b > 255: hl_b = 255
-                                                rr = int(rr * (1.0 - spec_strength) + hl_r * spec_strength)
-                                                gg = int(gg * (1.0 - spec_strength) + hl_g * spec_strength)
-                                                bb = int(bb * (1.0 - spec_strength) + hl_b * spec_strength)
-
-                                        if distance_squared > (hw - 0.7)*(hw - 0.7):
-                                            buf[yi, xi, 0] = (buf[yi, xi, 0] * 2 + rr) // 3
-                                            buf[yi, xi, 1] = (buf[yi, xi, 1] * 2 + gg) // 3
-                                            buf[yi, xi, 2] = (buf[yi, xi, 2] * 2 + bb) // 3
-                                        else:
-                                            if across_abs < 0.6:
-                                                buf[yi, xi, 0] = rr
-                                                buf[yi, xi, 1] = gg
-                                                buf[yi, xi, 2] = bb
-                                            else:
-                                                old_lum = buf[yi, xi, 0] + buf[yi, xi, 1] + buf[yi, xi, 2]
-                                                new_lum = rr + gg + bb
-                                                if new_lum >= old_lum - 30:
-                                                    buf[yi, xi, 0] = rr
-                                                    buf[yi, xi, 1] = gg
-                                                    buf[yi, xi, 2] = bb
-                                    elif distance_squared <= (hw-0.5)*(hw-0.5):
-                                        buf[yi, xi, 0] = r
-                                        buf[yi, xi, 1] = g
-                                        buf[yi, xi, 2] = b
-                                    else:
-                                        buf[yi, xi, 0] = (buf[yi, xi, 0] + r)//2
-                                        buf[yi, xi, 1] = (buf[yi, xi, 1] + g)//2
-                                        buf[yi, xi, 2] = (buf[yi, xi, 2] + b)//2
-
-        # ---- Puncture handling: draw puncture from previous stitch AFTER current stitch ----
-        # This way puncture is on top of both stitches sharing it, but will be naturally
-        # overdrawn by any later stitch that crosses it (including top layer over underlay).
-        # No lookahead needed - natural overdraw does the occlusion.
-        if use_realistic and effective_line_width > 1.8 and i > 0:
-            # Puncture position is end of previous stitch (junction)
-            # Use i-1 stitch end
-            px = int(stitches[i-1,2] * zoom + pan_x)
-            py = int(stitches[i-1,3] * zoom + pan_y)
-            if px >= 0 and px < w and py >= 0 and py < h:
-                # Skip if too close to last drawn puncture (dense satin)
-                ddx = px - last_puncture_x
-                ddy = py - last_puncture_y
-                if ddx*ddx + ddy*ddy >= 4:
-                    r_pb = int(stitches[i-1, 4])
-                    g_pb = int(stitches[i-1, 5])
-                    b_pb = int(stitches[i-1, 6])
-                    r_hole = int(r_pb * 0.45)
-                    g_hole = int(g_pb * 0.45)
-                    b_hole = int(b_pb * 0.45)
-                    r_ring = int(r_pb * 0.75)
-                    g_ring = int(g_pb * 0.75)
-                    b_ring = int(b_pb * 0.75)
-
-                    for oy in range(-puncture_radius, puncture_radius+1):
-                        for ox in range(-puncture_radius, puncture_radius+1):
-                            xi = px + ox
-                            yi = py + oy
-                            if xi < 0 or xi >= w or yi < 0 or yi >= h:
-                                continue
-                            dist2 = ox*ox + oy*oy
-                            if dist2 == 0:
-                                buf[yi, xi, 0] = r_hole
-                                buf[yi, xi, 1] = g_hole
-                                buf[yi, xi, 2] = b_hole
-                            elif dist2 == 1:
-                                buf[yi, xi, 0] = (buf[yi, xi, 0] * 2 + r_ring) // 3
-                                buf[yi, xi, 1] = (buf[yi, xi, 1] * 2 + g_ring) // 3
-                                buf[yi, xi, 2] = (buf[yi, xi, 2] * 2 + b_ring) // 3
-                            elif dist2 == 2 and puncture_radius > 1:
-                                buf[yi, xi, 0] = (buf[yi, xi, 0] * 3 + r_ring) // 4
-                                buf[yi, xi, 1] = (buf[yi, xi, 1] * 3 + g_ring) // 4
-                                buf[yi, xi, 2] = (buf[yi, xi, 2] * 3 + b_ring) // 4
-                    last_puncture_x = px
-                    last_puncture_y = py
-
-    # Final puncture at the very end of design
-    if use_realistic and effective_line_width > 1.8 and visible_count > 0:
-        px = int(stitches[visible_count-1,2] * zoom + pan_x)
-        py = int(stitches[visible_count-1,3] * zoom + pan_y)
-        if px >= 0 and px < w and py >= 0 and py < h:
-            ddx = px - last_puncture_x
-            ddy = py - last_puncture_y
-            if ddx*ddx + ddy*ddy >= 4:
-                r_pb = int(stitches[visible_count-1, 4])
-                g_pb = int(stitches[visible_count-1, 5])
-                b_pb = int(stitches[visible_count-1, 6])
-                r_hole = int(r_pb * 0.45)
-                g_hole = int(g_pb * 0.45)
-                b_hole = int(b_pb * 0.45)
-                r_ring = int(r_pb * 0.75)
-                g_ring = int(g_pb * 0.75)
-                b_ring = int(b_pb * 0.75)
-                for oy in range(-puncture_radius, puncture_radius+1):
-                    for ox in range(-puncture_radius, puncture_radius+1):
-                        xi = px + ox
-                        yi = py + oy
-                        if xi < 0 or xi >= w or yi < 0 or yi >= h:
+            # Fast path for thin lines (single pixel footprint).
+            if lw_int <= 1 and not use_realistic:
+                xi = int(x)
+                yi = int(y)
+                if 0 <= xi < w and 0 <= yi < h:
+                    buf[yi, xi, 0] = r
+                    buf[yi, xi, 1] = g
+                    buf[yi, xi, 2] = b
+            else:
+                # Thick lines: draw a disk around each sampled point.
+                render_radius = hw
+                r_loop = lw_int + 1
+                for oy in range(-r_loop, r_loop + 1):
+                    for ox in range(-r_loop, r_loop + 1):
+                        distance_squared = ox*ox + oy*oy
+                        if distance_squared > render_radius*render_radius + 0.5:
                             continue
-                        dist2 = ox*ox + oy*oy
-                        if dist2 == 0:
-                            buf[yi, xi, 0] = r_hole
-                            buf[yi, xi, 1] = g_hole
-                            buf[yi, xi, 2] = b_hole
-                        elif dist2 == 1:
-                            buf[yi, xi, 0] = (buf[yi, xi, 0] * 2 + r_ring) // 3
-                            buf[yi, xi, 1] = (buf[yi, xi, 1] * 2 + g_ring) // 3
-                            buf[yi, xi, 2] = (buf[yi, xi, 2] * 2 + b_ring) // 3
-                        elif dist2 == 2 and puncture_radius > 1:
-                            buf[yi, xi, 0] = (buf[yi, xi, 0] * 3 + r_ring) // 4
-                            buf[yi, xi, 1] = (buf[yi, xi, 1] * 3 + g_ring) // 4
-                            buf[yi, xi, 2] = (buf[yi, xi, 2] * 3 + b_ring) // 4
+                        xi = int(x + ox)
+                        yi = int(y + oy)
+                        if 0 <= xi < w and 0 <= yi < h:
+                            if use_realistic:
+                                # Cylindrical shading - bright center, slightly darker edges
+                                normal_position = ox * normal_x + oy * normal_y
+                                # -1 .. 1 across the thread width
+                                across = normal_position / hw if hw > 0.001 else 0.0
+                                if across < -1.0: across = -1.0
+                                if across >  1.0: across =  1.0
+                                across_abs = across if across >= 0 else -across
+
+                                # Smooth cylinder: 1 - across^2
+                                cyl = 1.0 - across_abs * across_abs
+                                # Mix dark edge -> bright center
+                                rr = int(r_dark + (r_bright - r_dark) * cyl)
+                                gg = int(g_dark + (g_bright - g_dark) * cyl)
+                                bb = int(b_dark + (b_bright - b_dark) * cyl)
+
+                                # Specular highlight - narrow strip offset from center
+                                # Light from top-left -> offset -0.30
+                                spec_center = -0.30
+                                spec_width = 0.28
+                                spec_dist = across - spec_center
+                                if spec_dist < 0: spec_dist = -spec_dist
+                                if spec_dist < spec_width:
+                                    spec = 1.0 - spec_dist / spec_width
+                                    spec = spec * spec  # sharper falloff
+                                    # Fade specular near stitch ends
+                                    along = t if t < 0.5 else 1.0 - t
+                                    if along < 0.15:
+                                        spec *= along / 0.15
+                                    # Add white specular
+                                    spec_strength = spec * 0.75
+                                    rr = int(rr + (255 - rr) * spec_strength)
+                                    gg = int(gg + (255 - gg) * spec_strength)
+                                    bb = int(bb + (255 - bb) * spec_strength)
+
+                                # Soft AA on edge only
+                                if distance_squared > (hw - 0.6)*(hw - 0.6):
+                                    buf[yi, xi, 0] = (buf[yi, xi, 0] + rr) // 2
+                                    buf[yi, xi, 1] = (buf[yi, xi, 1] + gg) // 2
+                                    buf[yi, xi, 2] = (buf[yi, xi, 2] + bb) // 2
+                                else:
+                                    buf[yi, xi, 0] = rr
+                                    buf[yi, xi, 1] = gg
+                                    buf[yi, xi, 2] = bb
+                            elif distance_squared <= (hw-0.5)*(hw-0.5):
+                                buf[yi, xi, 0] = r
+                                buf[yi, xi, 1] = g
+                                buf[yi, xi, 2] = b
+                            else:
+                                buf[yi, xi, 0] = (buf[yi, xi, 0] + r)//2
+                                buf[yi, xi, 1] = (buf[yi, xi, 1] + g)//2
+                                buf[yi, xi, 2] = (buf[yi, xi, 2] + b)//2
 
 
 @numba.njit
@@ -729,55 +627,6 @@ class EmbroideryOpenDialog(wx.Dialog):
         return str(self.selected_path) if self.selected_path else ""
 
 
-class ModeStatusPanel(wx.Panel):
-    """Clickable indicators for the main viewer display modes."""
-
-    def __init__(self, parent, viewer):
-        super().__init__(parent, size=(-1, 38))
-        self.viewer = viewer
-        self.SetBackgroundColour(wx.Colour(245, 245, 245))
-        sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.buttons = {}
-        for mode, label in (("R", "R"), ("X", "X"), ("J", "J"), ("V", "V")):
-            button = wx.ToggleButton(self, label=label, size=(32, 32))
-            button.SetMinSize((32, 32))
-            button.Bind(wx.EVT_BUTTON, self.OnModeClick)
-            self.buttons[mode] = button
-            sizer.Add(button, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 4)
-        self.SetSizer(sizer)
-        self.RefreshIndicators()
-
-    def OnModeClick(self, event):
-        for mode, button in self.buttons.items():
-            if event.GetEventObject() is button:
-                self.viewer.ToggleDisplayMode(mode)
-                return
-
-    def RefreshIndicators(self):
-        states = {
-            "R": self.viewer.show_realistic,
-            "X": self.viewer.show_density,
-            "V": self.viewer.show_stitches,
-        }
-        jump_state = 0
-        if self.viewer.show_jumps:
-            jump_state = 2 if self.viewer.risky_jumps_only else 1
-        for mode, button in self.buttons.items():
-            state = jump_state if mode == "J" else int(states[mode])
-            button.SetValue(bool(state))
-            if mode == "J" and state == 2:
-                color = wx.Colour(210, 145, 45)
-            elif state:
-                color = wx.Colour(75, 140, 90)
-            else:
-                color = wx.Colour(225, 225, 225)
-            button.SetBackgroundColour(
-                color
-            )
-            button.SetForegroundColour(wx.WHITE if state else wx.Colour(45, 45, 45))
-        self.Layout()
-
-
 class ProgressBarPanel(wx.Panel):
     """Interactive stitch timeline shown below the embroidery viewer.
 
@@ -1011,7 +860,7 @@ class EmbroideryViewerPanel(wx.Panel):
         self.command_events = {}
         self.jump_segments = []
         self.stitch_points_np = np.zeros((0, 2), dtype=np.float32)
-        self.stitch_density_np = np.zeros((0,), dtype=np.float32)
+        self.stitch_density_np = np.zeros((0, ), dtype=np.float32)
         self.density_ready = False
         self.cached_bitmap = None
         self.cached_pan_x = self.pan_x
@@ -1020,7 +869,6 @@ class EmbroideryViewerPanel(wx.Panel):
         self.zoom_render_timer = None
         self.need_redraw = True
         self.progress_bar = progress_bar
-        self.mode_panel = None
         self._last_key_time = 0
         self._key_throttle = 0.03
         self._last_dir = 1
@@ -1152,7 +1000,9 @@ class EmbroideryViewerPanel(wx.Panel):
         """Increase or decrease playback speed while preserving its direction."""
         new_index = max(
             0,
-            min(len(self.play_speed_levels) - 1, self.play_speed_index + direction),
+            min(
+                len(self.play_speed_levels) - 1,
+                self.play_speed_index + direction),
         )
         if new_index == self.play_speed_index:
             return False
@@ -1197,11 +1047,11 @@ class EmbroideryViewerPanel(wx.Panel):
         positions = sorted(self.command_events)
         current = self.visible_count
         if direction > 0:
-            targets = (position for position in positions if position > current)
+            targets = (position for position in positions
+                       if position > current)
         else:
-            targets = (
-                position for position in reversed(positions) if position < current
-            )
+            targets = (position for position in reversed(positions)
+                       if position < current)
         target = next(targets, None)
         if target is None:
             target = self.stitches_np.shape[0] if direction > 0 else 0
@@ -1277,12 +1127,9 @@ class EmbroideryViewerPanel(wx.Panel):
             ord("C"),
             ord("c"),
         )
-        if (
-            not is_space_or_c
-            and now - self._last_key_time < self._key_throttle
-            and not is_alt
-            and not is_ctrl
-        ):
+        if (not is_space_or_c
+                and now - self._last_key_time < self._key_throttle
+                and not is_alt and not is_ctrl):
             return
         self._last_key_time = now
         total = self.stitches_np.shape[0]
@@ -1291,24 +1138,20 @@ class EmbroideryViewerPanel(wx.Panel):
         highlight_needle = False
         step = 1 if is_alt else self.step_size
         if is_shift and not is_alt and not is_ctrl and key in (
-            wx.WXK_RIGHT,
-            wx.WXK_LEFT,
+                wx.WXK_RIGHT,
+                wx.WXK_LEFT,
         ):
-            changed = self.JumpToCommand(
-                1 if key == wx.WXK_RIGHT else -1
-            )
+            changed = self.JumpToCommand(1 if key == wx.WXK_RIGHT else -1)
             highlight_needle = changed
             if changed and self.is_playing:
                 self.play_timer.Stop()
                 self.is_playing = False
         elif self.is_playing and not is_alt and not is_ctrl and key in (
-            wx.WXK_RIGHT,
-            wx.WXK_LEFT,
+                wx.WXK_RIGHT,
+                wx.WXK_LEFT,
         ):
             key_direction = 1 if key == wx.WXK_RIGHT else -1
-            changed = self.AdjustPlaybackSpeed(
-                key_direction * self._last_dir
-            )
+            changed = self.AdjustPlaybackSpeed(key_direction * self._last_dir)
         elif is_ctrl and key in (wx.WXK_RIGHT, wx.WXK_LEFT):
             if key == wx.WXK_RIGHT:
                 self.JumpToColor(1)
@@ -1382,24 +1225,27 @@ class EmbroideryViewerPanel(wx.Panel):
                 return
         elif key in (ord("G"), ord("g")) and not is_alt and not is_ctrl:
             self.show_grid = not self.show_grid
-            frame = wx.GetTopLevelParent(self)
-            if hasattr(frame, "gridItem"):
-                frame.gridItem.Check(self.show_grid)
             changed = True
         elif key in (ord("J"), ord("j")) and not is_alt and not is_ctrl:
-            self.ToggleDisplayMode("J")
+            if not self.show_jumps:
+                self.show_jumps = True
+                self.risky_jumps_only = False
+            elif not self.risky_jumps_only:
+                self.risky_jumps_only = True
+            else:
+                self.show_jumps = False
+                self.risky_jumps_only = False
             changed = True
         elif key in (ord("X"), ord("x")) and not is_alt and not is_ctrl:
-            self.ToggleDisplayMode("X")
+            self.show_density = not self.show_density
+            if self.show_density and not self.density_ready:
+                self.CalculateStitchDensity()
             changed = True
         elif key in (ord("V"), ord("v")) and not is_alt and not is_ctrl:
-            self.ToggleDisplayMode("V")
+            self.show_stitches = not self.show_stitches
             changed = True
         elif key in (ord("R"), ord("r")) and not is_alt and not is_ctrl:
-            self.ToggleDisplayMode("R")
-            frame = wx.GetTopLevelParent(self)
-            if hasattr(frame, "realisticItem"):
-                frame.realisticItem.Check(self.show_realistic)
+            self.show_realistic = not self.show_realistic
             changed = True
         elif key in (ord("N"), ord("n")) and not is_alt and not is_ctrl:
             self.show_needle = not self.show_needle
@@ -1422,11 +1268,9 @@ class EmbroideryViewerPanel(wx.Panel):
         if changed:
             if highlight_needle:
                 self.HighlightNeedle()
-            if (
-                self.is_playing
-                and key in (wx.WXK_UP, wx.WXK_DOWN, wx.WXK_HOME, wx.WXK_END)
-                and not is_ctrl
-            ):
+            if (self.is_playing and key
+                    in (wx.WXK_UP, wx.WXK_DOWN, wx.WXK_HOME, wx.WXK_END)
+                    and not is_ctrl):
                 self.play_timer.Stop()
                 self.is_playing = False
             self.need_redraw = True
@@ -1436,70 +1280,28 @@ class EmbroideryViewerPanel(wx.Panel):
         else:
             e.Skip()
 
-    def ToggleDisplayMode(self, mode):
-        """Toggle a mode or advance the three-state JUMP mode."""
-        if mode == "R":
-            self.show_realistic = not self.show_realistic
-            frame = wx.GetTopLevelParent(self)
-            if hasattr(frame, "realisticItem"):
-                frame.realisticItem.Check(self.show_realistic)
-        elif mode == "X":
-            self.show_density = not self.show_density
-            if self.show_density and not self.density_ready:
-                self.CalculateStitchDensity()
-        elif mode == "V":
-            self.show_stitches = not self.show_stitches
-        elif mode == "J":
-            if not self.show_jumps:
-                self.show_jumps = True
-                self.risky_jumps_only = False
-            elif not self.risky_jumps_only:
-                self.risky_jumps_only = True
-            else:
-                self.show_jumps = False
-                self.risky_jumps_only = False
-        self.RefreshModeIndicators()
-        self.need_redraw = True
-        self.Refresh()
-
-    def RefreshModeIndicators(self):
-        if self.mode_panel is not None:
-            self.mode_panel.RefreshIndicators()
-
-    def _show_html_dialog(self, title, html_content, width=650, height=550):
-        """Helper to show HTML content in a dialog with HtmlWindow."""
-        dlg = wx.Dialog(self, title=title, size=(width, height), style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+    def _show_html_dialog(self, title, html_content, width=1050, height=700):
+        """Helper to show HTML content in a resizable dialog with HtmlWindow."""
+        dlg = wx.Dialog(self,
+                        title=title,
+                        size=(width, height),
+                        style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER
+                        | wx.MAXIMIZE_BOX)
         sizer = wx.BoxSizer(wx.VERTICAL)
         html_win = wx.html.HtmlWindow(dlg, style=wx.html.HW_SCROLLBAR_AUTO)
-        # Basic styling for better readability
         styled_html = f"""
-        <html><head><style>
-            body {{ font-family: sans-serif; font-size: 10pt; margin: 12px; color: #222; }}
-            h1 {{ font-size: 14pt; color: #1a1a1a; margin-bottom: 4px; }}
-            h2 {{ font-size: 11pt; color: #333; background: #f0f0f0; padding: 4px 8px; margin-top: 16px; margin-bottom: 6px; border-left: 4px solid #0078d7; }}
-            h3 {{ font-size: 10pt; color: #555; margin-top: 10px; margin-bottom: 4px; }}
-            table {{ border-collapse: collapse; width: 100%; margin: 4px 0; }}
-            td {{ padding: 3px 8px; vertical-align: top; }}
-            td:first-child {{ font-family: monospace; font-weight: bold; white-space: nowrap; color: #0078d7; width: 160px; }}
-            tr:nth-child(even) {{ background: #f9f9f9; }}
-            .kbd {{ background: #eee; border: 1px solid #ccc; border-radius: 3px; padding: 1px 5px; font-family: monospace; font-size: 9pt; }}
-            .section {{ margin-bottom: 12px; }}
-            .badge {{ display: inline-block; padding: 2px 6px; border-radius: 3px; font-size: 8pt; font-weight: bold; color: white; }}
-            .badge-on {{ background: #28a745; }}
-            .badge-off {{ background: #6c757d; }}
-            hr {{ border: none; border-top: 1px solid #ddd; margin: 12px 0; }}
-        </style></head><body>
+        <html><head></head><body>
         {html_content}
         </body></html>
         """
         html_win.SetPage(styled_html)
-        sizer.Add(html_win, 1, wx.EXPAND | wx.ALL, 8)
+        sizer.Add(html_win, 1, wx.EXPAND | wx.ALL, 6)
         btn_sizer = wx.StdDialogButtonSizer()
         ok_btn = wx.Button(dlg, wx.ID_OK)
         ok_btn.SetDefault()
         btn_sizer.AddButton(ok_btn)
         btn_sizer.Realize()
-        sizer.Add(btn_sizer, 0, wx.ALIGN_RIGHT | wx.ALL, 8)
+        sizer.Add(btn_sizer, 0, wx.ALIGN_RIGHT | wx.ALL, 6)
         dlg.SetSizer(sizer)
         dlg.Layout()
         dlg.CentreOnParent()
@@ -1507,71 +1309,73 @@ class EmbroideryViewerPanel(wx.Panel):
         dlg.Destroy()
 
     def ShowHelp(self):
-        """Show the keyboard and mouse controls using HtmlWindow."""
-        html = f"""
-        <h1>{APP_TITLE} - Help</h1>
-        <div class="section">
-        <h2>Mouse</h2>
-        <table>
-            <tr><td><span class="kbd">Wheel</span></td><td>Zoom in / out</td></tr>
-            <tr><td><span class="kbd">Drag</span></td><td>Pan view</td></tr>
-            <tr><td><span class="kbd">Click</span> on bar</td><td>Seek to stitch position</td></tr>
-        </table>
-        </div>
-        <div class="section">
-        <h2>Playback</h2>
-        <table>
-            <tr><td><span class="kbd">Right</span> / <span class="kbd">Left</span></td><td>Speed up / down while playing</td></tr>
-            <tr><td><span class="kbd">Alt+Right/Left</span></td><td>Move by one stitch when stopped</td></tr>
-            <tr><td><span class="kbd">Shift+Right/Left</span></td><td>Next / previous command (TRIM, COLOR CHANGE...)</td></tr>
-            <tr><td><span class="kbd">Ctrl+Right/Left</span></td><td>Next / previous color section</td></tr>
-            <tr><td><span class="kbd">Up</span> / <span class="kbd">Down</span></td><td>Fast seek (10x) when stopped</td></tr>
-            <tr><td><span class="kbd">Home</span> / <span class="kbd">End</span></td><td>First / last stitch</td></tr>
-            <tr><td><span class="kbd">Space</span></td><td>Play / pause</td></tr>
-            <tr><td><span class="kbd">Esc</span></td><td>Stop playback</td></tr>
-        </table>
-        </div>
-        <div class="section">
-        <h2>View</h2>
-        <table>
-            <tr><td><span class="kbd">C</span></td><td>Center design</td></tr>
-            <tr><td><span class="kbd">F</span></td><td>Fit design to window</td></tr>
-            <tr><td><span class="kbd">F11</span></td><td>Toggle fullscreen</td></tr>
-            <tr><td><span class="kbd">1</span></td><td>Show at physical 1:1 size</td></tr>
-            <tr><td><span class="kbd">V</span></td><td>Toggle embroidery visibility</td></tr>
-            <tr><td><span class="kbd">G</span></td><td>Toggle grid (10mm minor, 50mm major)</td></tr>
-            <tr><td><span class="kbd">N</span></td><td>Toggle needle crosshair</td></tr>
-            <tr><td><span class="kbd">J</span></td><td>Toggle jump paths (off → all → risky only)</td></tr>
-            <tr><td><span class="kbd">X</span></td><td>Toggle stitch density map</td></tr>
-            <tr><td><span class="kbd">R</span></td><td>Toggle realistic 2.5D render</td></tr>
-            <tr><td><span class="kbd">H</span></td><td>Show this help</td></tr>
-            <tr><td><span class="kbd">I</span></td><td>Show viewer settings</td></tr>
-        </table>
-        </div>
-        <div class="section">
-        <h2>Rendering</h2>
-        <table>
-            <tr><td><span class="kbd">+</span> / <span class="kbd">-</span></td><td>Change thread width</td></tr>
-            <tr><td><span class="kbd">[</span> / <span class="kbd">]</span></td><td>Change dark shading factor</td></tr>
-            <tr><td><span class="kbd">Shift+[</span> / <span class="kbd">Shift+]</span></td><td>Change light shading factor</td></tr>
-            <tr><td><span class="kbd">Ctrl+Arrows</span></td><td>Adjust thread color (HSL)</td></tr>
-        </table>
-        </div>
+        """Show keyboard and mouse controls in a compact 2-column HtmlWindow."""
+        # <!-- <div align="center"><font size="10"><b>{APP_TITLE} - Help</b></font></div> -->
+
+        html = """
+        <table class="layout" valign="top"><tr valign="top">
+        <td class="col" valign="top">
+            <font size="5"><b>Mouse</b></font><br>
+            <table class="inner" valign="top">
+                <tr><td><b>Wheel</b></td><td>Zoom</td></tr>
+                <tr><td><b>Drag</b></td><td>Pan</td></tr>
+                <tr><td nowrap="nowrap"><b>Click bar</b></td><td nowrap="nowrap">Seek stitch</td></tr>
+            </table>
+        </td>
+        <td class="col" valign="top">
+            <font size="5"><b>Playback</b></font><br>
+            <table class="inner" valign="top">
+                <tr><td><b>Right/Left</b></td><td>Speed up/down (playing)</td></tr>
+                <tr><td><b>Alt+Right/Left</b></td><td>Move 1 stitch (stopped)</td></tr>
+                <tr><td><b>Shift+Right/Left</b></td><td>Next/prev command</td></tr>
+                <tr><td><b>Ctrl+Right/Left</b></td><td>Next/prev color</td></tr>
+                <tr><td><b>Up/Down</b></td><td>Fast seek 10x</td></tr>
+                <tr><td><b>Home/End</b></td><td>First/last stitch</td></tr>
+                <tr><td><b>Space</b></td><td>Play/pause</td></tr>
+                <tr><td><b>Esc</b></td><td>Stop</td></tr>
+            </table>
+        </td>
+        <td class="col" valign="top">
+            <font size="5"><b>View</b></font><br>
+            <table class="inner" valign="top">
+                <tr><td><b>C</b></td><td>Center design</td></tr>
+                <tr><td><b>F</b></td><td>Fit to window</td></tr>
+                <tr><td><b>F11</b></td><td>Fullscreen</td></tr>
+                <tr><td><b>1</b></td><td>Physical 1:1 size</td></tr>
+                <tr><td><b>V</b></td><td>Toggle embroidery</td></tr>
+                <tr><td><b>G</b></td><td>Toggle grid</td></tr>
+                <tr><td><b>N</b></td><td>Toggle needle</td></tr>
+                <tr><td><b>J</b></td><td>Toggle jumps (off->all->risky)</td></tr>
+                <tr><td><b>X</b></td><td>Toggle density map</td></tr>
+                <tr><td><b>R</b></td><td>Toggle realistic 2.5D</td></tr>
+                <tr><td><b>H</b></td><td>This help</td></tr>
+                <tr><td><b>I</b></td><td>Settings</td></tr>
+            </table>
+        </td>
+        <td class="col" valign="top">
+            <font size="5"><b>Rendering</b></font><br>
+            <table class="inner" valign="top">
+                <tr><td><b>+/-</b></td><td>Thread width</td></tr>
+                <tr><td><b>[/]</b></td><td>Dark shading</td></tr>
+                <tr><td><b>Shift+[/]</b></td><td>Light shading</td></tr>
+                <tr><td><b>Ctrl+Arrows</b></td><td>Adjust thread color HSL</td></tr>
+            </table>
+        </td>
+        </tr></table>
         """
-        self._show_html_dialog("Help - " + APP_TITLE, html, width=620, height=640)
+        self._show_html_dialog("Help - " + APP_TITLE,
+                               html,
+                               width=1050,
+                               height=580)
 
     def ShowSettings(self):
-        """Show the current viewer state and rendering parameters using HtmlWindow."""
+        """Show viewer state in a compact 2-column HtmlWindow without scrolling."""
         total = self.stitches_np.shape[0]
         min_x, min_y, max_x, max_y = self.bounds
-        width = max_x - min_x
-        height = max_y - min_y
+        bw = max_x - min_x
+        bh = max_y - min_y
         density_mode = "on" if self.show_density else "off"
-        jump_mode = (
-            "risky only" if self.risky_jumps_only
-            else "all" if self.show_jumps
-            else "off"
-        )
+        jump_mode = "risky only" if self.risky_jumps_only else "all" if self.show_jumps else "off"
 
         def badge(on):
             cls = "badge-on" if on else "badge-off"
@@ -1582,52 +1386,66 @@ class EmbroideryViewerPanel(wx.Panel):
             cls = "badge-on" if is_on else "badge-off"
             return f'<span class="badge {cls}">{txt}</span>'
 
+        # <font size="13"><b>{APP_TITLE} - Settings</b></font><br>
         html = f"""
-        <h1>{APP_TITLE} - Viewer Settings</h1>
-
-        <h2>Design</h2>
-        <table>
-            <tr><td>Stitches</td><td><b>{self.visible_count}</b> / {total}</td></tr>
-            <tr><td>Color sections</td><td>{self.color_count}</td></tr>
-            <tr><td>Bounds</td><td>{width:.1f} x {height:.1f} mm</td></tr>
-            <tr><td>Bounds (min)</td><td>{min_x:.1f}, {min_y:.1f} mm</td></tr>
-            <tr><td>Bounds (max)</td><td>{max_x:.1f}, {max_y:.1f} mm</td></tr>
-        </table>
-
-        <h2>Viewport</h2>
-        <table>
-            <tr><td>Zoom</td><td>{self.zoom:.3f}x</td></tr>
-            <tr><td>Pan</td><td>{self.pan_x:.1f}, {self.pan_y:.1f} px</td></tr>
-            <tr><td>Grid</td><td>{badge(self.show_grid)}</td></tr>
-            <tr><td>Embroidery</td><td>{badge(self.show_stitches)}</td></tr>
-            <tr><td>Realistic render</td><td>{badge(self.show_realistic)}</td></tr>
-            <tr><td>Jump paths</td><td>{badge_text(jump_mode, self.show_jumps)}</td></tr>
-            <tr><td>Density map</td><td>{badge_text(density_mode, self.show_density)}</td></tr>
-            <tr><td>Density radius</td><td>{DENSITY_RADIUS_MM:.1f} mm</td></tr>
-            <tr><td>Density warning</td><td>{DENSITY_WARNING_PER_MM2:.1f} /mm²</td></tr>
-            <tr><td>Density critical</td><td>{DENSITY_CRITICAL_PER_MM2:.1f} /mm²</td></tr>
-            <tr><td>Needle</td><td>{badge(self.show_needle)}</td></tr>
-            <tr><td>Gradient</td><td>{badge(self.zoom > 1.2)}</td></tr>
-        </table>
-
-        <h2>Rendering</h2>
-        <table>
-            <tr><td>Line width</td><td><b>{self.line_width:.2f}</b> mm</td></tr>
-            <tr><td>Dark factor</td><td>{self.dark_factor:.2f}</td></tr>
-            <tr><td>Light factor</td><td>{self.light_factor:.2f}</td></tr>
-            <tr><td>Shading step</td><td>{self.shading_step:.2f}</td></tr>
-        </table>
-
-        <h2>Playback</h2>
-        <table>
-            <tr><td>Step size</td><td>{self.step_size}</td></tr>
-            <tr><td>Timer interval</td><td>{self.play_speed} ms</td></tr>
-            <tr><td>Timer step</td><td>{self.play_step} stitches</td></tr>
-            <tr><td>Direction</td><td>{'forward' if self._last_dir > 0 else 'backward'}</td></tr>
-            <tr><td>Playing</td><td>{badge(self.is_playing)}</td></tr>
-        </table>
+        <table class="layout"><tr>
+        <td class="col" valign="top">
+            <font size="5"><b>Design</b></font><br>
+            <table class="inner">
+                <tr><td><b>Stitches</b></td><td>{self.visible_count} / {total}</td></tr>
+                <tr><td><b>Colors</b></td><td>{self.color_count}</td></tr>
+                <tr><td><b>Bounds</b></td><td nowrap="nowrap">{bw:.1f} x {bh:.1f} mm</td></tr>
+                <tr><td><b>Min</b></td><td nowrap="nowrap">{min_x:.1f}, {min_y:.1f}</td></tr>
+                <tr><td><b>Max</b></td><td nowrap="nowrap">{max_x:.1f}, {max_y:.1f}</td></tr>
+            </table>
+        </td>
+        <td class="col" valign="top">
+            <font size="5"><b>Viewport</b></font><br>
+            <table class="inner">
+                <tr><td><b>Zoom</b></td><td>{self.zoom:.3f}x</td></tr>
+                <tr><td><b>Pan</b></td><td nowrap="nowrap">{self.pan_x:.0f}, {self.pan_y:.0f} px</td></tr>
+                <tr><td><b>Grid</b></td><td>{badge(self.show_grid)}</td></tr>
+                <tr><td><b>Embroidery</b></td><td>{badge(self.show_stitches)}</td></tr>
+                <tr><td><b>Realistic</b></td><td>{badge(self.show_realistic)}</td></tr>
+                <tr><td><b>Jumps</b></td><td>{badge_text(jump_mode, self.show_jumps)}</td></tr>
+                <tr><td><b>Density</b></td><td>{badge_text(density_mode, self.show_density)}</td></tr>
+                <tr><td><b>Needle</b></td><td>{badge(self.show_needle)}</td></tr>
+                <tr><td><b>Gradient</b></td><td>{badge(self.zoom > 1.2)}</td></tr>
+            </table>
+        </td>
+        <td class="col" valign="top">
+            <font size="5"><b>Density</b></font><br>
+            <table class="inner">
+                <tr><td><b>Radius</b></td><td nowrap="nowrap">{DENSITY_RADIUS_MM:.1f} mm</td></tr>
+                <tr><td><b>Warning</b></td><td nowrap="nowrap">{DENSITY_WARNING_PER_MM2:.1f} /mm²</td></tr>
+                <tr><td><b>Critical</b></td><td nowrap="nowrap">{DENSITY_CRITICAL_PER_MM2:.1f} /mm²</td></tr>
+            </table>
+        </td>
+        <td class="col" valign="top">
+            <font size="5"><b>Rendering</b></font><br>
+            <table class="inner">
+                <tr><td nowrap="nowrap"><b>Line width</b></td><td nowrap="nowrap">{self.line_width:.2f} mm</td></tr>
+                <tr><td nowrap="nowrap"><b>Dark factor</b></td><td>{self.dark_factor:.2f}</td></tr>
+                <tr><td nowrap="nowrap"><b>Light factor</b></td><td>{self.light_factor:.2f}</td></tr>
+                <tr><td nowrap="nowrap"><b>Shading step</b></td><td>{self.shading_step:.2f}</td></tr>
+            </table>
+        </td>
+        <td class="col" valign="top">
+            <font size="5"><b>Playback</b></font><br>
+            <table class="inner">
+                <tr><td><b>Step size</b></td><td>{self.step_size}</td></tr>
+                <tr><td><b>Interval</b></td><td nowrap="nowrap">{self.play_speed} ms</td></tr>
+                <tr><td nowrap="nowrap"><b>Timer step</b></td><td>{self.play_step}</td></tr>
+                <tr><td><b>Direction</b></td><td>{'forward' if self._last_dir > 0 else 'backward'}</td></tr>
+                <tr><td><b>Playing</b></td><td>{badge(self.is_playing)}</td></tr>
+            </table>
+        </td>
+        </tr></table>
         """
-        self._show_html_dialog("Settings - " + APP_TITLE, html, width=600, height=650)
+        self._show_html_dialog("Settings - " + APP_TITLE,
+                               html,
+                               width=1050,
+                               height=620)
 
     def SetStepSize(self, size):
         self.step_size = max(1, size)
@@ -1643,8 +1461,7 @@ class EmbroideryViewerPanel(wx.Panel):
         last_x = last_y = 0
         cur_color_idx = 0
         has_thread_colors = bool(
-            hasattr(pattern, "threadlist") and pattern.threadlist
-        )
+            hasattr(pattern, "threadlist") and pattern.threadlist)
         palette = pattern.threadlist if has_thread_colors else AUTO_THREAD_COLORS
         min_x = min_y = 1e9
         max_x = max_y = -1e9
@@ -1653,7 +1470,7 @@ class EmbroideryViewerPanel(wx.Panel):
         self.command_events = {}
         self.jump_segments = []
         self.stitch_points_np = np.zeros((0, 2), dtype=np.float32)
-        self.stitch_density_np = np.zeros((0,), dtype=np.float32)
+        self.stitch_density_np = np.zeros((0, ), dtype=np.float32)
         self.density_ready = False
         jump_run_indices = []
         for st in pattern.stitches:
@@ -1662,23 +1479,22 @@ class EmbroideryViewerPanel(wx.Panel):
             raw_command = st[2] if len(st) > 2 else emb.STITCH
             if hasattr(emb, "decode_embroidery_command"):
                 cmd, thread, needle, order = emb.decode_embroidery_command(
-                    raw_command
-                )
+                    raw_command)
             else:
                 cmd = raw_command
                 thread = needle = order = None
             if hasattr(emb, "JUMP") and cmd == emb.JUMP:
                 event_position = len(segs)
-                self.command_events.setdefault(event_position, []).append("JUMP")
+                self.command_events.setdefault(event_position,
+                                               []).append("JUMP")
                 self.jump_segments.append([last_x, last_y, x, y, 1, len(segs)])
                 jump_run_indices.append(len(self.jump_segments) - 1)
                 last_x, last_y = x, y
                 continue
             if hasattr(emb, "END") and cmd == emb.END:
                 break
-            is_color_change = (
-                hasattr(emb, "COLOR_CHANGE") and cmd == emb.COLOR_CHANGE
-            )
+            is_color_change = (hasattr(emb, "COLOR_CHANGE")
+                               and cmd == emb.COLOR_CHANGE)
             if is_color_change:
                 for jump_index in jump_run_indices:
                     self.jump_segments[jump_index][4] = 0
@@ -1694,9 +1510,8 @@ class EmbroideryViewerPanel(wx.Panel):
                 command_label = "COLOR CHANGE"
                 if details:
                     command_label += f" ({', '.join(details)})"
-                self.command_events.setdefault(event_position, []).append(
-                    command_label
-                )
+                self.command_events.setdefault(event_position,
+                                               []).append(command_label)
                 cur_color_idx += 1
                 if segs:
                     self.color_boundaries.append(len(segs))
@@ -1704,14 +1519,15 @@ class EmbroideryViewerPanel(wx.Panel):
                 continue
             if hasattr(emb, "TRIM") and cmd == emb.TRIM:
                 event_position = len(segs)
-                self.command_events.setdefault(event_position, []).append("TRIM")
+                self.command_events.setdefault(event_position,
+                                               []).append("TRIM")
                 continue
             for command_name in ("STOP", "SLOW", "FAST"):
-                if hasattr(emb, command_name) and cmd == getattr(emb, command_name):
+                if hasattr(emb, command_name) and cmd == getattr(
+                        emb, command_name):
                     event_position = len(segs)
-                    self.command_events.setdefault(event_position, []).append(
-                        command_name
-                    )
+                    self.command_events.setdefault(event_position,
+                                                   []).append(command_name)
                     break
             else:
                 command_name = None
@@ -1740,8 +1556,8 @@ class EmbroideryViewerPanel(wx.Panel):
             self.bounds = (min_x, min_y, max_x, max_y)
             self.visible_count = self.stitches_np.shape[0]
             self.color_boundaries = sorted(
-                set(boundary for boundary in self.color_boundaries if boundary < len(segs))
-            )
+                set(boundary for boundary in self.color_boundaries
+                    if boundary < len(segs)))
             self.color_count = len(self.color_boundaries)
             if fit_to_screen:
                 self._pending_fit_to_screen = True
@@ -1819,24 +1635,23 @@ class EmbroideryViewerPanel(wx.Panel):
         w, h = self.GetSize()
         if self.stitches_np.shape[0] == 0:
             dc.SetFont(
-                wx.Font(
-                    14, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL
-                )
-            )
+                wx.Font(14, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL,
+                        wx.FONTWEIGHT_NORMAL))
             dc.DrawText(
                 "Open an embroidery file via File > Open or pass it as a command-line argument",
                 20,
                 20,
             )
             dc.DrawText(
-                "H=help, Space=play/pause, Ctrl+Arrows=color, Alt+Arrows=1", 20, 45
-            )
+                "H=help, Space=play/pause, Ctrl+Arrows=color, Alt+Arrows=1",
+                20, 45)
             return
         use_shaded = self.zoom > 1.2
         buf = np.full((h, w, 3), 255, dtype=np.uint8)
         if self.show_grid:
             render_grid_numba(buf, self.zoom, self.pan_x, self.pan_y)
-        if self.show_stitches and self.stitches_np.shape[0] > 0 and self.visible_count > 0:
+        if self.show_stitches and self.stitches_np.shape[
+                0] > 0 and self.visible_count > 0:
             render_shaded_numba(
                 buf,
                 self.stitches_np,
@@ -1880,7 +1695,8 @@ class EmbroideryViewerPanel(wx.Panel):
                     continue
                 if self.risky_jumps_only and not risky:
                     continue
-                color = wx.Colour(220, 45, 45) if risky else wx.Colour(100, 100, 100)
+                color = wx.Colour(220, 45, 45) if risky else wx.Colour(
+                    100, 100, 100)
                 dc.SetPen(wx.Pen(color, 2, wx.PENSTYLE_SHORT_DASH))
                 dc.DrawLine(
                     int(x1 * self.zoom + self.pan_x),
@@ -1889,10 +1705,10 @@ class EmbroideryViewerPanel(wx.Panel):
                     int(y2 * self.zoom + self.pan_y),
                 )
 
-
     def DrawNeedleOverlay(self, dc):
         """Draw the current needle position above the cached stitch bitmap."""
-        if not self.show_stitches or not self.show_needle or self.stitches_np.shape[0] == 0:
+        if not self.show_stitches or not self.show_needle or self.stitches_np.shape[
+                0] == 0:
             return
         if self.visible_count > 0:
             stitch = self.stitches_np[self.visible_count - 1]
@@ -1999,10 +1815,10 @@ class EmbroideryViewerPanel(wx.Panel):
         self.need_redraw = True
         self.Refresh()
         if self.progress_bar and self.progress_bar.dragging:
-            self.progress_bar.dragging=False
+            self.progress_bar.dragging = False
             if self.progress_bar.HasCapture(): self.progress_bar.ReleaseMouse()
 
-    def OnMotion(self,e):
+    def OnMotion(self, e):
         """Update the viewport offset while the user drags the canvas."""
         if self.drag_start and e.Dragging() and e.LeftIsDown():
             dx = e.GetPosition()[0] - self.drag_start[0]
@@ -2072,20 +1888,14 @@ class Frame(wx.Frame):
         sizer = wx.BoxSizer(wx.VERTICAL)
         self.viewer = EmbroideryViewerPanel(main_panel, None)
         self.progress = ProgressBarPanel(main_panel, self.viewer)
-        self.mode_status = ModeStatusPanel(main_panel, self.viewer)
-        self.viewer.mode_panel = self.mode_status
         self.viewer.progress_bar = self.progress
         self.viewer.SetDropTarget(EmbroideryFileDropTarget(self))
 
         sizer.Add(self.viewer, 1, wx.EXPAND)
-        sizer.Add(self.mode_status, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 6)
         sizer.Add(self.progress, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM,
                   6)
         main_panel.SetSizer(sizer)
         self._main_panel = main_panel
-        frame_sizer = wx.BoxSizer(wx.VERTICAL)
-        frame_sizer.Add(main_panel, 1, wx.EXPAND)
-        self.SetSizer(frame_sizer)
 
         # Build the menu bar with file and playback options, and bind them to handlers.
         menubar = wx.MenuBar()
@@ -2132,8 +1942,6 @@ class Frame(wx.Frame):
         self.menubar = menubar
         self.fileMenu = fileMenu
         self.playbackMenu = playbackMenu
-        self.gridItem = gridItem
-        self.realisticItem = realisticItem
 
         # Global accelerators
         # Alt+F / Alt+P are handled by mnemonics in menu titles (&File / &Playback).
@@ -2178,8 +1986,7 @@ class Frame(wx.Frame):
             _refresh_after_color_jump(), prevCol)
 
         # Set up the status bar with instructions.
-        status_bar = self.CreateStatusBar(1, wx.STB_SIZEGRIP)
-        status_bar.SetMinSize((-1, 22))
+        self.CreateStatusBar()
         self.SetStatusText(DEFAULT_STATUS_TEXT)
 
         # Window geometry
@@ -2206,7 +2013,6 @@ class Frame(wx.Frame):
             return
         if fullscreen:
             self.is_fullscreen = True
-            self.mode_status.Hide()
             self.Freeze()
             if not self.IsShown():
                 self.Show()
@@ -2296,14 +2102,12 @@ class Frame(wx.Frame):
         self.viewer.show_grid = e.IsChecked()
         self.viewer.need_redraw = True
         self.viewer.Refresh()
-        self.viewer.RefreshModeIndicators()
 
     def OnToggleRealistic(self, e):
         """Toggle the 2.5D realistic thread renderer."""
         self.viewer.show_realistic = e.IsChecked()
         self.viewer.need_redraw = True
         self.viewer.Refresh()
-        self.viewer.RefreshModeIndicators()
 
     def OnOpen(self, e):
         """Prompt for an embroidery file and update the window metadata."""
@@ -2398,12 +2202,6 @@ class Frame(wx.Frame):
     def ToggleFullScreen(self):
         """Toggle undecorated fullscreen without changing the viewport."""
         self.is_fullscreen = not self.is_fullscreen
-        if self.is_fullscreen:
-            self.mode_status.Hide()
-        else:
-            self.mode_status.Show()
-        self.Layout()
-        self._main_panel.Layout()
         self.ShowFullScreen(self.is_fullscreen)
 
 
@@ -2452,12 +2250,12 @@ if __name__ == "__main__":
         help="Export a clean print PNG and exit",
     )
     parser.add_argument(
-        "--export-shaded-png", "--png",
+        "--export-shaded-png",
         metavar="PATH",
         help="Export a shaded print PNG and exit",
     )
     parser.add_argument(
-        "--export-icon", "--icon",
+        "--export-icon",
         metavar="PATH",
         help="Export a clean 256px preview PNG and exit",
     )
@@ -2468,13 +2266,13 @@ if __name__ == "__main__":
         help="DPI for --export-png (default: 300)",
     )
     parser.add_argument(
-        "--export-background", "--bg",
+        "--export-background",
         choices=("transparent", "white"),
         default="transparent",
         help="PNG background (default: transparent)",
     )
     parser.add_argument(
-        "--export-grid", "--grid",
+        "--export-grid",
         action="store_true",
         help="Add a 10 mm grid to exported PNG",
     )
