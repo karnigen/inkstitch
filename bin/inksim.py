@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 
+# InkSim - interactive embroidery simulator and preview renderer.
+# Copyright (c) 2026 Ink/Stitch authors
+
 from pathlib import Path
 import sys
 import os
@@ -627,6 +630,55 @@ class EmbroideryOpenDialog(wx.Dialog):
         return str(self.selected_path) if self.selected_path else ""
 
 
+class ModeStatusPanel(wx.Panel):
+    """Clickable indicators for the main viewer display modes."""
+
+    def __init__(self, parent, viewer):
+        super().__init__(parent, size=(-1, 38))
+        self.viewer = viewer
+        self.SetBackgroundColour(wx.Colour(245, 245, 245))
+        sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.buttons = {}
+        for mode in ("R", "X", "J", "V"):
+            button = wx.ToggleButton(self, label=mode, size=(32, 32))
+            button.SetMinSize((32, 32))
+            button.Bind(wx.EVT_BUTTON, self.OnModeClick)
+            self.buttons[mode] = button
+            sizer.Add(button, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 4)
+        self.SetSizer(sizer)
+        self.RefreshIndicators()
+
+    def OnModeClick(self, event):
+        for mode, button in self.buttons.items():
+            if event.GetEventObject() is button:
+                self.viewer.ToggleDisplayMode(mode)
+                return
+
+    def RefreshIndicators(self):
+        states = {
+            "R": self.viewer.show_realistic,
+            "X": self.viewer.show_density,
+            "V": self.viewer.show_stitches,
+        }
+        jump_state = 0
+        if self.viewer.show_jumps:
+            jump_state = 2 if self.viewer.risky_jumps_only else 1
+        for mode, button in self.buttons.items():
+            state = jump_state if mode == "J" else int(states[mode])
+            button.SetValue(bool(state))
+            if mode == "J" and state == 2:
+                color = wx.Colour(210, 145, 45)
+            elif state:
+                color = wx.Colour(75, 140, 90)
+            else:
+                color = wx.Colour(225, 225, 225)
+            button.SetBackgroundColour(color)
+            button.SetForegroundColour(
+                wx.WHITE if state else wx.Colour(45, 45, 45)
+            )
+        self.Layout()
+
+
 class ProgressBarPanel(wx.Panel):
     """Interactive stitch timeline shown below the embroidery viewer.
 
@@ -869,6 +921,7 @@ class EmbroideryViewerPanel(wx.Panel):
         self.zoom_render_timer = None
         self.need_redraw = True
         self.progress_bar = progress_bar
+        self.mode_panel = None
         self._last_key_time = 0
         self._key_throttle = 0.03
         self._last_dir = 1
@@ -1225,27 +1278,21 @@ class EmbroideryViewerPanel(wx.Panel):
                 return
         elif key in (ord("G"), ord("g")) and not is_alt and not is_ctrl:
             self.show_grid = not self.show_grid
+            frame = wx.GetTopLevelParent(self)
+            if hasattr(frame, "gridItem"):
+                frame.gridItem.Check(self.show_grid)
             changed = True
         elif key in (ord("J"), ord("j")) and not is_alt and not is_ctrl:
-            if not self.show_jumps:
-                self.show_jumps = True
-                self.risky_jumps_only = False
-            elif not self.risky_jumps_only:
-                self.risky_jumps_only = True
-            else:
-                self.show_jumps = False
-                self.risky_jumps_only = False
+            self.ToggleDisplayMode("J")
             changed = True
         elif key in (ord("X"), ord("x")) and not is_alt and not is_ctrl:
-            self.show_density = not self.show_density
-            if self.show_density and not self.density_ready:
-                self.CalculateStitchDensity()
+            self.ToggleDisplayMode("X")
             changed = True
         elif key in (ord("V"), ord("v")) and not is_alt and not is_ctrl:
-            self.show_stitches = not self.show_stitches
+            self.ToggleDisplayMode("V")
             changed = True
         elif key in (ord("R"), ord("r")) and not is_alt and not is_ctrl:
-            self.show_realistic = not self.show_realistic
+            self.ToggleDisplayMode("R")
             changed = True
         elif key in (ord("N"), ord("n")) and not is_alt and not is_ctrl:
             self.show_needle = not self.show_needle
@@ -1279,6 +1326,36 @@ class EmbroideryViewerPanel(wx.Panel):
                 self.progress_bar.Refresh()
         else:
             e.Skip()
+
+    def ToggleDisplayMode(self, mode):
+        """Toggle a mode or advance the three-state JUMP mode."""
+        if mode == "R":
+            self.show_realistic = not self.show_realistic
+            frame = wx.GetTopLevelParent(self)
+            if hasattr(frame, "realisticItem"):
+                frame.realisticItem.Check(self.show_realistic)
+        elif mode == "X":
+            self.show_density = not self.show_density
+            if self.show_density and not self.density_ready:
+                self.CalculateStitchDensity()
+        elif mode == "V":
+            self.show_stitches = not self.show_stitches
+        elif mode == "J":
+            if not self.show_jumps:
+                self.show_jumps = True
+                self.risky_jumps_only = False
+            elif not self.risky_jumps_only:
+                self.risky_jumps_only = True
+            else:
+                self.show_jumps = False
+                self.risky_jumps_only = False
+        self.RefreshModeIndicators()
+        self.need_redraw = True
+        self.Refresh()
+
+    def RefreshModeIndicators(self):
+        if self.mode_panel is not None:
+            self.mode_panel.RefreshIndicators()
 
     def _show_html_dialog(self, title, html_content, width=1050, height=700):
         """Helper to show HTML content in a resizable dialog with HtmlWindow."""
@@ -1888,14 +1965,20 @@ class Frame(wx.Frame):
         sizer = wx.BoxSizer(wx.VERTICAL)
         self.viewer = EmbroideryViewerPanel(main_panel, None)
         self.progress = ProgressBarPanel(main_panel, self.viewer)
+        self.mode_status = ModeStatusPanel(main_panel, self.viewer)
+        self.viewer.mode_panel = self.mode_status
         self.viewer.progress_bar = self.progress
         self.viewer.SetDropTarget(EmbroideryFileDropTarget(self))
 
         sizer.Add(self.viewer, 1, wx.EXPAND)
+        sizer.Add(self.mode_status, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 6)
         sizer.Add(self.progress, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM,
                   6)
         main_panel.SetSizer(sizer)
         self._main_panel = main_panel
+        frame_sizer = wx.BoxSizer(wx.VERTICAL)
+        frame_sizer.Add(main_panel, 1, wx.EXPAND)
+        self.SetSizer(frame_sizer)
 
         # Build the menu bar with file and playback options, and bind them to handlers.
         menubar = wx.MenuBar()
@@ -1942,6 +2025,8 @@ class Frame(wx.Frame):
         self.menubar = menubar
         self.fileMenu = fileMenu
         self.playbackMenu = playbackMenu
+        self.gridItem = gridItem
+        self.realisticItem = realisticItem
 
         # Global accelerators
         # Alt+F / Alt+P are handled by mnemonics in menu titles (&File / &Playback).
@@ -2013,6 +2098,7 @@ class Frame(wx.Frame):
             return
         if fullscreen:
             self.is_fullscreen = True
+            self.mode_status.Hide()
             self.Freeze()
             if not self.IsShown():
                 self.Show()
@@ -2102,12 +2188,14 @@ class Frame(wx.Frame):
         self.viewer.show_grid = e.IsChecked()
         self.viewer.need_redraw = True
         self.viewer.Refresh()
+        self.viewer.RefreshModeIndicators()
 
     def OnToggleRealistic(self, e):
         """Toggle the 2.5D realistic thread renderer."""
         self.viewer.show_realistic = e.IsChecked()
         self.viewer.need_redraw = True
         self.viewer.Refresh()
+        self.viewer.RefreshModeIndicators()
 
     def OnOpen(self, e):
         """Prompt for an embroidery file and update the window metadata."""
@@ -2202,6 +2290,12 @@ class Frame(wx.Frame):
     def ToggleFullScreen(self):
         """Toggle undecorated fullscreen without changing the viewport."""
         self.is_fullscreen = not self.is_fullscreen
+        if self.is_fullscreen:
+            self.mode_status.Hide()
+        else:
+            self.mode_status.Show()
+        self.Layout()
+        self._main_panel.Layout()
         self.ShowFullScreen(self.is_fullscreen)
 
 
