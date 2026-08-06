@@ -156,9 +156,7 @@ def render_shaded_numba(
 ):
     # Draw visible stitch segments into the RGB buffer.
     # Each segment is [x1, y1, x2, y2, r, g, b] in mm + base thread color.
-    # We project mm -> screen pixels using zoom/pan and then rasterize.
     h, w, _ = buf.shape
-    # Realistic must keep same width as shaded to avoid thick blurry look.
     minimum_line_width = 1.0
     effective_line_width = min(
         MAX_RENDER_LINE_WIDTH_PX,
@@ -167,9 +165,9 @@ def render_shaded_numba(
     hw = effective_line_width * 0.5
     lw_int = max(1, int(np.ceil(effective_line_width)))
 
-    # Precompute fixed light direction for direction-independent shading
+    # Fixed light for direction-independent shading
     light_x = -0.5
-    light_y = -0.8660254  # normalized NW light
+    light_y = -0.8660254
 
     for i in range(visible_count):
         x1 = stitches[i,0] * zoom + pan_x
@@ -189,7 +187,6 @@ def render_shaded_numba(
         length = np.sqrt(dx*dx + dy*dy)
         if length <= 0: continue
 
-        # Tangent and normal - canonicalized to light to avoid L->R flip
         tangent_x = dx / length
         tangent_y = dy / length
         normal_x = -tangent_y
@@ -197,13 +194,11 @@ def render_shaded_numba(
         if normal_x * light_x + normal_y * light_y < 0.0:
             normal_x = -normal_x
             normal_y = -normal_y
-
         dot_tl = tangent_x * light_x + tangent_y * light_y
         perp_sq = 1.0 - dot_tl * dot_tl
         if perp_sq < 0.0: perp_sq = 0.0
         perp_factor = np.sqrt(perp_sq)
 
-        # Brighter, less contrast for realistic
         r_dark = int(r_base * (0.85 + 0.15 * dark_factor))
         g_dark = int(g_base * (0.85 + 0.15 * dark_factor))
         b_dark = int(b_base * (0.85 + 0.15 * dark_factor))
@@ -253,13 +248,11 @@ def render_shaded_numba(
                                 if across < -1.0: across = -1.0
                                 if across >  1.0: across =  1.0
                                 across_abs = across if across >= 0 else -across
-
                                 cyl = 1.0 - across_abs * across_abs * 0.7
                                 rr = int(r_dark + (r_bright - r_dark) * cyl)
                                 gg = int(g_dark + (g_bright - g_dark) * cyl)
                                 bb = int(b_dark + (b_bright - b_dark) * cyl)
 
-                                # Zoom-stable soft specular
                                 zoom_fade = (hw - 1.2) / 1.3
                                 if zoom_fade < 0.0: zoom_fade = 0.0
                                 if zoom_fade > 1.0: zoom_fade = 1.0
@@ -312,42 +305,90 @@ def render_shaded_numba(
                                 buf[yi, xi, 1] = (buf[yi, xi, 1] + g)//2
                                 buf[yi, xi, 2] = (buf[yi, xi, 2] + b)//2
 
-    # Second pass: needle puncture marks for realistic mode
-    # Makes it clear where thread enters fabric, breaks satin uniformity
+    # Second pass: punctures, but hide if covered by later stitches
     if use_realistic and effective_line_width > 1.8:
-        # Puncture size depends on zoom, but stays small
         puncture_radius = 1
         if hw > 2.5:
             puncture_radius = 2
-        # Avoid drawing puncture for every segment if too dense - skip every other
-        # to reduce clutter, but still show entry points
+        cover_radius_sq = (hw + 1.0) * (hw + 1.0)
+
         for i in range(visible_count):
-            # Only draw puncture at segment end (real needle penetration)
-            # Skip if next stitch starts far away (jump) - still draw to show jump point
             px = int(stitches[i,2] * zoom + pan_x)
             py = int(stitches[i,3] * zoom + pan_y)
             if px < 0 or px >= w or py < 0 or py >= h:
                 continue
-            # Simple density skip for very dense areas: draw every 2nd puncture in satin
-            # Check distance to previous puncture in screen space
+
+            # Skip too dense punctures
             if i > 0:
                 prev_x = int(stitches[i-1,2] * zoom + pan_x)
                 prev_y = int(stitches[i-1,3] * zoom + pan_y)
                 ddx = px - prev_x
                 ddy = py - prev_y
-                if ddx*ddx + ddy*ddy < 4:  # too close, skip to avoid blob
+                if ddx*ddx + ddy*ddy < 4:
                     continue
+
+            # Check if this puncture is covered by any later stitch
+            # Look ahead limited window for performance (covers underlay)
+            is_covered = False
+            look_ahead = 1200
+            if visible_count - i - 1 < look_ahead:
+                look_ahead = visible_count - i - 1
+            for j in range(i+1, i+1+look_ahead):
+                # Quick bbox: if puncture far from segment j, skip
+                x1j = stitches[j,0] * zoom + pan_x
+                y1j = stitches[j,1] * zoom + pan_y
+                x2j = stitches[j,2] * zoom + pan_x
+                y2j = stitches[j,3] * zoom + pan_y
+                # Bounding box expanded by cover radius
+                min_xj = x1j
+                if x2j < min_xj: min_xj = x2j
+                max_xj = x1j
+                if x2j > max_xj: max_xj = x2j
+                min_yj = y1j
+                if y2j < min_yj: min_yj = y2j
+                max_yj = y1j
+                if y2j > max_yj: max_yj = y2j
+                if px < min_xj - hw - 2 or px > max_xj + hw + 2: continue
+                if py < min_yj - hw - 2 or py > max_yj + hw + 2: continue
+
+                # Distance point to segment
+                vx = x2j - x1j
+                vy = y2j - y1j
+                wx_ = px - x1j
+                wy_ = py - y1j
+                c1 = wx_ * vx + wy_ * vy
+                if c1 <= 0:
+                    dist2 = (px - x1j)*(px - x1j) + (py - y1j)*(py - y1j)
+                else:
+                    c2 = vx*vx + vy*vy
+                    if c2 <= c1:
+                        dist2 = (px - x2j)*(px - x2j) + (py - y2j)*(py - y2j)
+                    else:
+                        b = c1 / c2
+                        pbx = x1j + b * vx
+                        pby = y1j + b * vy
+                        dist2 = (px - pbx)*(px - pbx) + (py - pby)*(py - pby)
+
+                # If puncture lies within thread of later stitch, and not at shared endpoint
+                # Shared endpoint means same position as stitch j start (thread continues)
+                # Allow 1.5px tolerance for shared point
+                same_point_dist2 = (px - int(x1j))*(px - int(x1j)) + (py - int(y1j))*(py - int(y1j))
+                if same_point_dist2 < 3:
+                    continue
+
+                if dist2 <= cover_radius_sq:
+                    is_covered = True
+                    break
+
+            if is_covered:
+                continue
 
             r_base = int(stitches[i, 4])
             g_base = int(stitches[i, 5])
             b_base = int(stitches[i, 6])
-
-            # Dark hole + slight fabric compression ring
-            # Center hole: darker
             r_hole = int(r_base * 0.45)
             g_hole = int(g_base * 0.45)
             b_hole = int(b_base * 0.45)
-            # Compression ring: slightly darker than thread
             r_ring = int(r_base * 0.75)
             g_ring = int(g_base * 0.75)
             b_ring = int(b_base * 0.75)
@@ -360,18 +401,14 @@ def render_shaded_numba(
                         continue
                     dist2 = ox*ox + oy*oy
                     if dist2 == 0:
-                        # Center hole
                         buf[yi, xi, 0] = r_hole
                         buf[yi, xi, 1] = g_hole
                         buf[yi, xi, 2] = b_hole
                     elif dist2 == 1:
-                        # Direct neighbors - compression shadow
-                        # Blend 60% ring, 40% existing to keep underlying color
                         buf[yi, xi, 0] = (buf[yi, xi, 0] * 2 + r_ring) // 3
                         buf[yi, xi, 1] = (buf[yi, xi, 1] * 2 + g_ring) // 3
                         buf[yi, xi, 2] = (buf[yi, xi, 2] * 2 + b_ring) // 3
                     elif dist2 == 2 and puncture_radius > 1:
-                        # Diagonal for larger puncture - very subtle
                         buf[yi, xi, 0] = (buf[yi, xi, 0] * 3 + r_ring) // 4
                         buf[yi, xi, 1] = (buf[yi, xi, 1] * 3 + g_ring) // 4
                         buf[yi, xi, 2] = (buf[yi, xi, 2] * 3 + b_ring) // 4
