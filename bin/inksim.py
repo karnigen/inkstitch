@@ -924,6 +924,8 @@ class EmbroideryViewerPanel(wx.Panel):
         self.mode_panel = None
         self._last_key_time = 0
         self._key_throttle = 0.03
+        self.help_dialog = None
+        self.settings_dialog = None
         self._last_dir = 1
         self._pending_fit_to_screen = False
         self.play_timer = wx.Timer(self)
@@ -1357,8 +1359,12 @@ class EmbroideryViewerPanel(wx.Panel):
         if self.mode_panel is not None:
             self.mode_panel.RefreshIndicators()
 
-    def _show_html_dialog(self, title, html_content, width=1050, height=700):
+    def _show_html_dialog(self, key, title, html_content, width=1050, height=700):
         """Helper to show HTML content in a resizable dialog with HtmlWindow."""
+        dialog = getattr(self, key)
+        if dialog is not None:
+            dialog.Close()
+            return
         dlg = wx.Dialog(self,
                         title=title,
                         size=(width, height),
@@ -1378,12 +1384,30 @@ class EmbroideryViewerPanel(wx.Panel):
         ok_btn.SetDefault()
         btn_sizer.AddButton(ok_btn)
         btn_sizer.Realize()
+        ok_btn.Bind(wx.EVT_BUTTON, lambda event: dlg.Close())
         sizer.Add(btn_sizer, 0, wx.ALIGN_RIGHT | wx.ALL, 6)
         dlg.SetSizer(sizer)
         dlg.Layout()
         dlg.CentreOnParent()
-        dlg.ShowModal()
-        dlg.Destroy()
+        def on_close(event):
+            setattr(self, key, None)
+            dlg.Destroy()
+
+        dlg.Bind(wx.EVT_CLOSE, on_close)
+        def on_dialog_key(event):
+            key_code = event.GetKeyCode()
+            closes_dialog = (
+                (key == "help_dialog" and key_code in (ord("H"), ord("h")))
+                or (key == "settings_dialog" and key_code in (ord("I"), ord("i")))
+            )
+            if closes_dialog:
+                dlg.Close()
+                return
+            event.Skip()
+
+        dlg.Bind(wx.EVT_CHAR_HOOK, on_dialog_key)
+        setattr(self, key, dlg)
+        dlg.Show()
 
     def ShowHelp(self):
         """Show keyboard and mouse controls in a compact 2-column HtmlWindow."""
@@ -1425,8 +1449,8 @@ class EmbroideryViewerPanel(wx.Panel):
                 <tr><td><b>J</b></td><td>Toggle jumps (off->all->risky)</td></tr>
                 <tr><td><b>X</b></td><td>Toggle density map</td></tr>
                 <tr><td><b>R</b></td><td>Toggle realistic 2.5D</td></tr>
-                <tr><td><b>H</b></td><td>This help</td></tr>
-                <tr><td><b>I</b></td><td>Settings</td></tr>
+                <tr><td><b>H</b></td><td>Toggle help</td></tr>
+                <tr><td><b>I</b></td><td>Toggle settings</td></tr>
             </table>
         </td>
         <td class="col" valign="top">
@@ -1440,7 +1464,7 @@ class EmbroideryViewerPanel(wx.Panel):
         </td>
         </tr></table>
         """
-        self._show_html_dialog("Help - " + APP_TITLE,
+        self._show_html_dialog("help_dialog", "Help - " + APP_TITLE,
                                html,
                                width=1050,
                                height=580)
@@ -1519,7 +1543,7 @@ class EmbroideryViewerPanel(wx.Panel):
         </td>
         </tr></table>
         """
-        self._show_html_dialog("Settings - " + APP_TITLE,
+        self._show_html_dialog("settings_dialog", "Settings - " + APP_TITLE,
                                html,
                                width=1050,
                                height=620)
@@ -2174,6 +2198,13 @@ class Frame(wx.Frame):
         if e.AltDown() and kc in (ord('F'), ord('f'), ord('P'), ord('p')):
             e.Skip()
             return
+        if not e.ControlDown() and not e.AltDown():
+            if kc in (ord('H'), ord('h')):
+                self.viewer.ShowHelp()
+                return
+            if kc in (ord('I'), ord('i')):
+                self.viewer.ShowSettings()
+                return
         e.Skip()
 
     def OnClose(self, e):
