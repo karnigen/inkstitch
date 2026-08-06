@@ -2288,12 +2288,12 @@ if __name__ == "__main__":
         help="Export a clean print PNG and exit",
     )
     parser.add_argument(
-        "--export-shaded-png",
+        "--export-shaded-png", "--png",
         metavar="PATH",
         help="Export a shaded print PNG and exit",
     )
     parser.add_argument(
-        "--export-icon",
+        "--export-icon", "--icon",
         metavar="PATH",
         help="Export a clean 256px preview PNG and exit",
     )
@@ -2304,13 +2304,13 @@ if __name__ == "__main__":
         help="DPI for --export-png (default: 300)",
     )
     parser.add_argument(
-        "--export-background",
+        "--export-background", "--bg",
         choices=("transparent", "white"),
         default="transparent",
         help="PNG background (default: transparent)",
     )
     parser.add_argument(
-        "--export-grid",
+        "--export-grid", "--grid",
         action="store_true",
         help="Add a 10 mm grid to exported PNG",
     )
