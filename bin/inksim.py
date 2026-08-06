@@ -220,7 +220,13 @@ def render_realistic_numba(
     dark_factor,
     light_factor,
 ):
-    """Render stitches as lit cylindrical threads with soft cast shadows."""
+    """Render stitches as lit cylindrical threads with soft cast shadows.
+
+    This is an intentionally approximate per-stitch model. Its isolated
+    cylinders can exaggerate sewing direction and dark gaps, especially in
+    satin areas; a future renderer should use a continuous anisotropic satin
+    surface or normal map for more faithful results.
+    """
     height, width, _ = buf.shape
     thread_radius = max(0.75, line_width * zoom * 0.5)
     margin = int(np.ceil(thread_radius + 4.0))
@@ -1673,8 +1679,9 @@ class EmbroideryViewerPanel(wx.Panel):
         <td class="col" valign="top">
             <font size="5"><b>Playback</b></font><br>
             <table class="inner" valign="top">
-                <tr><td><b>Right/Left</b></td><td>Speed up/down (playing)</td></tr>
-                <tr><td><b>Alt+Right/Left</b></td><td>Move 1 stitch (stopped)</td></tr>
+                <tr><td><b>Right/Left</b></td><td nowrap="nowrap">Speed up/down (playing)</td></tr>
+                <tr><td><b></b></td><td nowrap="nowrap">Next/prev N stitches</td></tr>
+                <tr><td><b>Alt+Right/Left</b></td><td>Next/prev 1 stitch</td></tr>
                 <tr><td><b>Shift+Right/Left</b></td><td>Next/prev command</td></tr>
                 <tr><td><b>Ctrl+Right/Left</b></td><td>Next/prev color</td></tr>
                 <tr><td><b>Up/Down</b></td><td>Fast seek 10x</td></tr>
@@ -1703,9 +1710,9 @@ class EmbroideryViewerPanel(wx.Panel):
         <td class="col" valign="top">
             <font size="5"><b>Rendering</b></font><br>
             <table class="inner" valign="top">
-                <tr><td><b>+/-</b></td><td>Thread width</td></tr>
-                <tr><td><b>[/]</b></td><td>Dark shading</td></tr>
-                <tr><td><b>Shift+[/]</b></td><td>Light shading</td></tr>
+                <tr><td><b>+/-</b></td><td nowrap="nowrap">Thread width</td></tr>
+                <tr><td><b>[/]</b></td><td nowrap="nowrap">Dark shading</td></tr>
+                <tr><td><b>Shift+[/]</b></td><td nowrap="nowrap">Light shading</td></tr>
             </table>
         </td>
         </tr></table>
