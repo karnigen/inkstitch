@@ -534,6 +534,7 @@ class EmbroideryViewerPanel(wx.Panel):
         self.step_size = 10
         self.show_grid = True
         self.show_density = False
+        self.density_only = False
         self.show_jumps = False
         self.show_needle = True
         self.needle_highlighted = False
@@ -917,7 +918,14 @@ class EmbroideryViewerPanel(wx.Panel):
             self.show_jumps = not self.show_jumps
             changed = True
         elif key in (ord("X"), ord("x")) and not is_alt and not is_ctrl:
-            self.show_density = not self.show_density
+            if not self.show_density:
+                self.show_density = True
+                self.density_only = False
+            elif not self.density_only:
+                self.density_only = True
+            else:
+                self.show_density = False
+                self.density_only = False
             if self.show_density and not self.density_ready:
                 self.CalculateStitchDensity()
             changed = True
@@ -999,6 +1007,11 @@ class EmbroideryViewerPanel(wx.Panel):
         min_x, min_y, max_x, max_y = self.bounds
         width = max_x - min_x
         height = max_y - min_y
+        density_mode = (
+            "density only" if self.density_only
+            else "overlay" if self.show_density
+            else "off"
+        )
         settings_text = (
             f"{APP_TITLE} viewer settings\n\n"
             f"Design\n"
@@ -1010,7 +1023,7 @@ class EmbroideryViewerPanel(wx.Panel):
             f"  Pan: {self.pan_x:.1f}, {self.pan_y:.1f} px\n"
             f"  Grid: {'on' if self.show_grid else 'off'}\n"
             f"  Jump paths: {'on' if self.show_jumps else 'off'}\n"
-            f"  Density map: {'on' if self.show_density else 'off'}\n"
+            f"  Density map: {density_mode}\n"
             f"  Density radius: {DENSITY_RADIUS_MM:.1f} mm\n"
             f"  Density warning: {DENSITY_WARNING_PER_MM2:.1f} stitches/mm2\n"
             f"  Density critical: {DENSITY_CRITICAL_PER_MM2:.1f} stitches/mm2\n"
@@ -1209,7 +1222,11 @@ class EmbroideryViewerPanel(wx.Panel):
         buf = np.full((h, w, 3), 255, dtype=np.uint8)
         if self.show_grid:
             render_grid_numba(buf, self.zoom, self.pan_x, self.pan_y)
-        if self.stitches_np.shape[0] > 0 and self.visible_count > 0:
+        if (
+            not self.density_only
+            and self.stitches_np.shape[0] > 0
+            and self.visible_count > 0
+        ):
             render_shaded_numba(
                 buf,
                 self.stitches_np,
