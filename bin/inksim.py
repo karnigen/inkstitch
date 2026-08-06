@@ -1469,6 +1469,8 @@ class EmbroideryViewerPanel(wx.Panel):
         """Render the current viewport, using the cached bitmap when possible."""
         dc = wx.PaintDC(self)
         dc.Clear()
+        if self._pending_fit_to_screen:
+            return
         if not self.need_redraw and self.cached_bitmap:
             zoom_ratio = self.zoom / self.cached_zoom
             if abs(zoom_ratio - 1.0) < 0.001:
