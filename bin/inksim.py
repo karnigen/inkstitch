@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 
+# InkSim - interactive embroidery simulator and preview renderer.
+# Copyright (c) 2026 Ink/Stitch authors
+
+# Dual run: system python3 or .venv python
+
+
 from pathlib import Path
 import sys
 import os
 import argparse
-
-#-------------------------------------------------------------------
-# Dual run: system python3 or .venv python
 
 script_dir = Path(__file__).resolve().parent
 
@@ -2129,6 +2132,7 @@ class Frame(wx.Frame):
             return
         if fullscreen:
             self.is_fullscreen = True
+            self.mode_status.Hide()
             self.Freeze()
             if not self.IsShown():
                 self.Show()
@@ -2320,6 +2324,12 @@ class Frame(wx.Frame):
     def ToggleFullScreen(self):
         """Toggle undecorated fullscreen without changing the viewport."""
         self.is_fullscreen = not self.is_fullscreen
+        if self.is_fullscreen:
+            self.mode_status.Hide()
+        else:
+            self.mode_status.Show()
+        self.Layout()
+        self._main_panel.Layout()
         self.ShowFullScreen(self.is_fullscreen)
 
 
