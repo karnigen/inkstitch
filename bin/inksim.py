@@ -18,6 +18,8 @@ DEFAULT_STATUS_TEXT = (
 DENSITY_RADIUS_MM = 2.5
 DENSITY_WARNING_PER_MM2 = 3.0
 DENSITY_CRITICAL_PER_MM2 = 6.0
+MAX_RENDER_LINE_WIDTH_PX = 16.0
+MAX_RENDER_STEPS = 2048
 AUTO_THREAD_COLORS = (
     (220, 30, 30),
     (30, 100, 220),
@@ -156,7 +158,10 @@ def render_shaded_numba(
     h, w, _ = buf.shape
     # The configured width is in mm; convert it to screen pixels with the
     # world-to-screen transform so thread thickness follows the design.
-    effective_line_width = max(1.0, line_width * zoom)
+    effective_line_width = min(
+        MAX_RENDER_LINE_WIDTH_PX,
+        max(1.0, line_width * zoom),
+    )
     hw = effective_line_width * 0.5
     lw_int = max(1, int(np.ceil(effective_line_width)))
 
@@ -190,9 +195,9 @@ def render_shaded_numba(
         g_light = int(g_base + (255 - g_base) * light_factor)
         b_light = int(b_base + (255 - b_base) * light_factor)
 
-        # Sample twice per screen pixel to keep short stitches connected
-        # when zooming out and the projected segments become sub-pixel-sized.
-        steps = max(1, int(np.ceil(length * 2.0)))
+        # Sample at most once per screen pixel; cap long segments to keep
+        # extreme zoom levels responsive.
+        steps = min(MAX_RENDER_STEPS, max(1, int(np.ceil(length))))
         for s in range(steps+1):
             t = s / steps
             x = x1 + dx * t
@@ -666,6 +671,10 @@ class EmbroideryViewerPanel(wx.Panel):
         self.stitch_density_np = np.zeros((0,), dtype=np.float32)
         self.density_ready = False
         self.cached_bitmap = None
+        self.cached_pan_x = self.pan_x
+        self.cached_pan_y = self.pan_y
+        self.cached_zoom = self.zoom
+        self.zoom_render_timer = None
         self.need_redraw = True
         self.progress_bar = progress_bar
         self._last_key_time = 0
@@ -1328,7 +1337,32 @@ class EmbroideryViewerPanel(wx.Panel):
         dc = wx.PaintDC(self)
         dc.Clear()
         if not self.need_redraw and self.cached_bitmap:
-            dc.DrawBitmap(self.cached_bitmap, 0, 0)
+            zoom_ratio = self.zoom / self.cached_zoom
+            if abs(zoom_ratio - 1.0) < 0.001:
+                pan_delta_x = round(self.pan_x - self.cached_pan_x)
+                pan_delta_y = round(self.pan_y - self.cached_pan_y)
+                dc.DrawBitmap(self.cached_bitmap, pan_delta_x, pan_delta_y)
+            else:
+                bitmap_width = self.cached_bitmap.GetWidth()
+                bitmap_height = self.cached_bitmap.GetHeight()
+                preview_x = round(self.pan_x - zoom_ratio * self.cached_pan_x)
+                preview_y = round(self.pan_y - zoom_ratio * self.cached_pan_y)
+                source_dc = wx.MemoryDC()
+                source_dc.SelectObject(self.cached_bitmap)
+                try:
+                    dc.StretchBlit(
+                        preview_x,
+                        preview_y,
+                        round(bitmap_width * zoom_ratio),
+                        round(bitmap_height * zoom_ratio),
+                        source_dc,
+                        0,
+                        0,
+                        bitmap_width,
+                        bitmap_height,
+                    )
+                finally:
+                    source_dc.SelectObject(wx.NullBitmap)
             self.DrawAnalysisOverlays(dc)
             self.DrawNeedleOverlay(dc)
             return
@@ -1379,6 +1413,9 @@ class EmbroideryViewerPanel(wx.Panel):
         img.SetData(buf.tobytes())
         bmp = wx.Bitmap(img)
         self.cached_bitmap = bmp
+        self.cached_pan_x = self.pan_x
+        self.cached_pan_y = self.pan_y
+        self.cached_zoom = self.zoom
         self.need_redraw = False
         dc.DrawBitmap(bmp, 0, 0)
         self.DrawAnalysisOverlays(dc)
@@ -1478,6 +1515,21 @@ class EmbroideryViewerPanel(wx.Panel):
         scale = self.zoom / old
         self.pan_x = mx - scale * (mx - self.pan_x)
         self.pan_y = my - scale * (my - self.pan_y)
+        if self.zoom_render_timer is not None:
+            self.zoom_render_timer.Stop()
+        if self.cached_bitmap:
+            self.need_redraw = False
+            self.zoom_render_timer = wx.CallLater(
+                140,
+                self._finish_zoom_render,
+            )
+        else:
+            self.need_redraw = True
+        self.Refresh()
+
+    def _finish_zoom_render(self):
+        """Schedule a full-quality render after zooming settles."""
+        self.zoom_render_timer = None
         self.need_redraw = True
         self.Refresh()
 
@@ -1493,6 +1545,8 @@ class EmbroideryViewerPanel(wx.Panel):
         if self.HasCapture():
             self.ReleaseMouse()
         self.drag_start = None
+        self.need_redraw = True
+        self.Refresh()
         if self.progress_bar and self.progress_bar.dragging:
             self.progress_bar.dragging=False
             if self.progress_bar.HasCapture(): self.progress_bar.ReleaseMouse()
@@ -1504,7 +1558,6 @@ class EmbroideryViewerPanel(wx.Panel):
             dy = e.GetPosition()[1] - self.drag_start[1]
             self.pan_x = self.pan_start[0] + dx
             self.pan_y = self.pan_start[1] + dy
-            self.need_redraw = True
             self.Refresh()
 
 
