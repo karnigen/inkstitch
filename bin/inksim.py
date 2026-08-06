@@ -20,6 +20,7 @@ DENSITY_WARNING_PER_MM2 = 3.0
 DENSITY_CRITICAL_PER_MM2 = 6.0
 MAX_RENDER_LINE_WIDTH_PX = 16.0
 MAX_RENDER_STEPS = 2048
+REALISTIC_END_FADE_PX = 4.0
 AUTO_THREAD_COLORS = (
     (220, 30, 30),
     (30, 100, 220),
@@ -151,6 +152,7 @@ def render_shaded_numba(
     line_width,
     dark_factor,
     light_factor,
+    use_realistic=False,
 ):
     # Draw visible stitch segments into the RGB buffer.
     # Each segment is [x1, y1, x2, y2, r, g, b] in mm + base thread color.
@@ -158,9 +160,10 @@ def render_shaded_numba(
     h, w, _ = buf.shape
     # The configured width is in mm; convert it to screen pixels with the
     # world-to-screen transform so thread thickness follows the design.
+    minimum_line_width = 2.0 if use_realistic else 1.0
     effective_line_width = min(
         MAX_RENDER_LINE_WIDTH_PX,
-        max(1.0, line_width * zoom),
+        max(minimum_line_width, line_width * zoom),
     )
     hw = effective_line_width * 0.5
     lw_int = max(1, int(np.ceil(effective_line_width)))
@@ -186,6 +189,8 @@ def render_shaded_numba(
         dy = y2 - y1
         length = np.sqrt(dx*dx + dy*dy)
         if length <= 0: continue
+        normal_x = -dy / length
+        normal_y = dx / length
 
         # Precompute dark/light variants for pseudo-3D thread shading.
         r_dark = int(r_base * dark_factor)
@@ -214,7 +219,7 @@ def render_shaded_numba(
                 b = b_base
 
             # Fast path for thin lines (single pixel footprint).
-            if lw_int <= 1:
+            if lw_int <= 1 and not use_realistic:
                 xi = int(x)
                 yi = int(y)
                 if 0 <= xi < w and 0 <= yi < h:
@@ -224,13 +229,44 @@ def render_shaded_numba(
             else:
                 # Thick lines: draw a disk around each sampled point.
                 # Interior pixels are solid, rim pixels are blended for a softer edge.
-                for oy in range(-lw_int, lw_int+1):
-                    for ox in range(-lw_int, lw_int+1):
-                        if ox*ox + oy*oy > hw*hw + 1: continue
+                render_radius = hw + 2 if use_realistic else hw
+                for oy in range(-lw_int-2 if use_realistic else -lw_int,
+                                lw_int+3 if use_realistic else lw_int+1):
+                    for ox in range(-lw_int-2 if use_realistic else -lw_int,
+                                    lw_int+3 if use_realistic else lw_int+1):
+                        distance_squared = ox*ox + oy*oy
+                        if distance_squared > render_radius*render_radius + 1:
+                            continue
                         xi = int(x + ox)
                         yi = int(y + oy)
                         if 0 <= xi < w and 0 <= yi < h:
-                            if ox*ox + oy*oy <= (hw-0.5)*(hw-0.5):
+                            if use_realistic:
+                                normal_position = ox * normal_x + oy * normal_y
+                                if distance_squared > hw * hw:
+                                    buf[yi, xi, 0] = (buf[yi, xi, 0] * 7 + r_dark) // 8
+                                    buf[yi, xi, 1] = (buf[yi, xi, 1] * 7 + g_dark) // 8
+                                    buf[yi, xi, 2] = (buf[yi, xi, 2] * 7 + b_dark) // 8
+                                else:
+                                    across = abs(normal_position) / hw
+                                    across = max(0.0, min(1.0, across))
+                                    center_highlight = 1.0 - across * across
+                                    along = min(length * t, length * (1.0 - t))
+                                    end_fade = min(
+                                        1.0,
+                                        max(0.0, along) / REALISTIC_END_FADE_PX,
+                                    )
+                                    highlight = center_highlight * end_fade
+                                    edge_shadow = 1.0 - end_fade * (0.35 + 0.65 * center_highlight)
+                                    rr = int(r_dark + (r_light - r_dark) * highlight)
+                                    gg = int(g_dark + (g_light - g_dark) * highlight)
+                                    bb = int(b_dark + (b_light - b_dark) * highlight)
+                                    rr = int(rr * (1.0 - edge_shadow * 0.18))
+                                    gg = int(gg * (1.0 - edge_shadow * 0.18))
+                                    bb = int(bb * (1.0 - edge_shadow * 0.18))
+                                    buf[yi, xi, 0] = rr
+                                    buf[yi, xi, 1] = gg
+                                    buf[yi, xi, 2] = bb
+                            elif distance_squared <= (hw-0.5)*(hw-0.5):
                                 buf[yi, xi, 0] = r
                                 buf[yi, xi, 1] = g
                                 buf[yi, xi, 2] = b
@@ -787,6 +823,7 @@ class EmbroideryViewerPanel(wx.Panel):
         self.step_size = 10
         self.show_grid = True
         self.show_stitches = True
+        self.show_realistic = False
         self.show_density = False
         self.show_jumps = False
         self.risky_jumps_only = False
@@ -1190,6 +1227,9 @@ class EmbroideryViewerPanel(wx.Panel):
         elif key in (ord("V"), ord("v")) and not is_alt and not is_ctrl:
             self.show_stitches = not self.show_stitches
             changed = True
+        elif key in (ord("R"), ord("r")) and not is_alt and not is_ctrl:
+            self.show_realistic = not self.show_realistic
+            changed = True
         elif key in (ord("N"), ord("n")) and not is_alt and not is_ctrl:
             self.show_needle = not self.show_needle
             if self.show_needle:
@@ -1286,6 +1326,7 @@ class EmbroideryViewerPanel(wx.Panel):
             f"  Pan: {self.pan_x:.1f}, {self.pan_y:.1f} px\n"
             f"  Grid: {'on' if self.show_grid else 'off'}\n"
             f"  Embroidery: {'on' if self.show_stitches else 'off'}\n"
+            f"  Realistic render: {'on' if self.show_realistic else 'off'}\n"
             f"  Jump paths: {jump_mode}\n"
             f"  Density map: {density_mode}\n"
             f"  Density radius: {DENSITY_RADIUS_MM:.1f} mm\n"
@@ -1533,6 +1574,7 @@ class EmbroideryViewerPanel(wx.Panel):
                 self.line_width,
                 self.dark_factor,
                 self.light_factor,
+                self.show_realistic and self.zoom > 1.2,
             )
         if self.show_density and len(self.stitch_points_np) > 0:
             render_density_numba(
@@ -1780,6 +1822,9 @@ class Frame(wx.Frame):
         fullscreenItem = fileMenu.Append(wx.ID_ANY, "Fullscreen\tF11")
         gridItem = fileMenu.AppendCheckItem(wx.ID_ANY, "Show 1cm grid\tG")
         gridItem.Check(True)
+        realisticItem = fileMenu.AppendCheckItem(
+            wx.ID_ANY, "Realistic thread render\tR"
+        )
         helpItem = fileMenu.Append(wx.ID_ANY, "Help\tH")
         fileMenu.AppendSeparator()
         rotateLeftItem = fileMenu.Append(wx.ID_ANY, "Rotate left 90 deg")
@@ -1831,6 +1876,7 @@ class Frame(wx.Frame):
         self.Bind(wx.EVT_MENU, lambda e: self.viewer.FitToScreen(), fitItem)
         self.Bind(wx.EVT_MENU, lambda e: self.ToggleFullScreen(), fullscreenItem)
         self.Bind(wx.EVT_MENU, self.OnToggleGrid, gridItem)
+        self.Bind(wx.EVT_MENU, self.OnToggleRealistic, realisticItem)
         self.Bind(wx.EVT_MENU, lambda e: self.viewer.ShowHelp(), helpItem)
         self.Bind(wx.EVT_MENU, lambda e: self.viewer.RotateDesign(-1), rotateLeftItem)
         self.Bind(wx.EVT_MENU, lambda e: self.viewer.RotateDesign(1), rotateRightItem)
@@ -1964,6 +2010,12 @@ class Frame(wx.Frame):
     def OnToggleGrid(self, e):
         """Apply the grid menu state to the viewer and redraw it."""
         self.viewer.show_grid = e.IsChecked()
+        self.viewer.need_redraw = True
+        self.viewer.Refresh()
+
+    def OnToggleRealistic(self, e):
+        """Toggle the 2.5D realistic thread renderer."""
+        self.viewer.show_realistic = e.IsChecked()
         self.viewer.need_redraw = True
         self.viewer.Refresh()
 
