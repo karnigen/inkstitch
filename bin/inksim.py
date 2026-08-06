@@ -1359,6 +1359,12 @@ class Frame(wx.Frame):
         super().__init__(None, title=APP_TITLE, size=init_size)
         self.is_fullscreen = False
         self._should_maximize_default = should_maximize_default
+        self.config = wx.Config(APP_TITLE)
+        self.last_directory = self.config.Read("last_directory", "")
+        if initial_file and Path(initial_file).is_file():
+            self.last_directory = str(Path(initial_file).resolve().parent)
+            self.config.Write("last_directory", self.last_directory)
+            self.config.Flush()
 
         # Create the main panel, viewer, and progress bar, and arrange them vertically.
         main_panel = wx.Panel(self)
@@ -1461,13 +1467,13 @@ class Frame(wx.Frame):
         # Load design with no auto-fit, we will fit explicitly after final size.
         initial_file_loaded = (
             initial_file
-            and os.path.exists(initial_file)
+            and Path(initial_file).exists()
             and self.viewer.LoadDesign(initial_file, fit_to_screen=False)
         )
         if initial_file_loaded:
             total = self.viewer.stitches_np.shape[0]
             self.SetTitle(
-                f"{APP_TITLE} - {os.path.basename(initial_file)} - {total} sts"
+                f"{APP_TITLE} - {Path(initial_file).name} - {total} sts"
             )
 
         if fullscreen:
@@ -1564,18 +1570,25 @@ class Frame(wx.Frame):
 
     def OnOpen(self, e):
         """Prompt for an embroidery file and update the window metadata."""
-        dlg = wx.FileDialog(self,
-                    "Open embroidery file",
-                    wildcard=get_supported_input_wildcard(),
-                            style=wx.FD_OPEN)
+        dlg = wx.FileDialog(
+            self,
+            "Open embroidery file",
+            defaultDir=self.last_directory,
+            wildcard=get_supported_input_wildcard(),
+            style=wx.FD_OPEN,
+        )
         if dlg.ShowModal() == wx.ID_OK:
             path = dlg.GetPath()
             if self.viewer.LoadDesign(path, fit_to_screen=True):
+                selected_path = Path(path).resolve()
+                self.last_directory = str(selected_path.parent)
+                self.config.Write("last_directory", self.last_directory)
+                self.config.Flush()
                 total = self.viewer.stitches_np.shape[0]
                 bw = self.viewer.bounds[2] - self.viewer.bounds[0]
                 bh = self.viewer.bounds[3] - self.viewer.bounds[1]
                 self.SetTitle(
-                    f"{APP_TITLE} - {os.path.basename(path)} - {total} sts - {bw:.1f}x{bh:.1f}mm"
+                    f"{APP_TITLE} - {selected_path.name} - {total} sts - {bw:.1f}x{bh:.1f}mm"
                 )
                 self.progress.Refresh()
         dlg.Destroy()
