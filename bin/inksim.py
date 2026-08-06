@@ -68,6 +68,7 @@ ensure_venv()
 #-------------------------------------------------------------------
 
 import wx
+import wx.html
 import time
 import numpy as np
 import numba
@@ -1465,46 +1466,102 @@ class EmbroideryViewerPanel(wx.Panel):
         if self.mode_panel is not None:
             self.mode_panel.RefreshIndicators()
 
-    def ShowHelp(self):
-        """Show the keyboard and mouse controls used by the viewer."""
-        help_header = f"{APP_TITLE}\n{'=' * len(APP_TITLE)}\n\n"
-        help_text = help_header + (
-            "MOUSE\n"
-            "  Wheel       Zoom\n"
-            "  Drag        Pan\n"
-            "  Click bar   Seek\n\n"
-            "PLAYBACK\n"
-            "  Right/Left       Speed up/down while playing\n"
-            "  Alt+Right/Left   Move by one stitch when stopped\n"
-            "  Shift+Right/Left Next/previous command\n"
-            "  Ctrl+Right/Left  Next/previous color\n"
-            "  Up/Down          Fast seek when stopped\n"
-            "  Home/End         First/last stitch\n"
-            "  Space            Play/pause\n"
-            "  Esc              Stop\n\n"
-            "VIEW\n"
-            "  C                Center design\n"
-            "  F                Fit design to window\n"
-            "  F11              Toggle fullscreen\n"
-            "  1                Show design at physical 1:1 size\n"
-            "  V                Toggle embroidery visibility\n"
-            "  G                Toggle grid\n"
-            "  H                Show this help\n"
-            "  I                Show viewer settings\n\n"
-            "  N                Toggle needle crosshair\n\n"
-            "  J                Toggle jump paths\n"
-            "  X                Toggle stitch density map\n\n"
-            "RENDERING\n"
-            "  +/-              Change thread width\n"
-            "  [/]              Change dark shading\n"
-            "  Shift+[/]        Change light shading\n"
-        )
-        dlg = wx.MessageDialog(self, help_text, "Help", wx.OK | wx.ICON_INFORMATION)
+    def _show_html_dialog(self, title, html_content, width=650, height=550):
+        """Helper to show HTML content in a dialog with HtmlWindow."""
+        dlg = wx.Dialog(self, title=title, size=(width, height), style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        html_win = wx.html.HtmlWindow(dlg, style=wx.html.HW_SCROLLBAR_AUTO)
+        # Basic styling for better readability
+        styled_html = f"""
+        <html><head><style>
+            body {{ font-family: sans-serif; font-size: 10pt; margin: 12px; color: #222; }}
+            h1 {{ font-size: 14pt; color: #1a1a1a; margin-bottom: 4px; }}
+            h2 {{ font-size: 11pt; color: #333; background: #f0f0f0; padding: 4px 8px; margin-top: 16px; margin-bottom: 6px; border-left: 4px solid #0078d7; }}
+            h3 {{ font-size: 10pt; color: #555; margin-top: 10px; margin-bottom: 4px; }}
+            table {{ border-collapse: collapse; width: 100%; margin: 4px 0; }}
+            td {{ padding: 3px 8px; vertical-align: top; }}
+            td:first-child {{ font-family: monospace; font-weight: bold; white-space: nowrap; color: #0078d7; width: 160px; }}
+            tr:nth-child(even) {{ background: #f9f9f9; }}
+            .kbd {{ background: #eee; border: 1px solid #ccc; border-radius: 3px; padding: 1px 5px; font-family: monospace; font-size: 9pt; }}
+            .section {{ margin-bottom: 12px; }}
+            .badge {{ display: inline-block; padding: 2px 6px; border-radius: 3px; font-size: 8pt; font-weight: bold; color: white; }}
+            .badge-on {{ background: #28a745; }}
+            .badge-off {{ background: #6c757d; }}
+            hr {{ border: none; border-top: 1px solid #ddd; margin: 12px 0; }}
+        </style></head><body>
+        {html_content}
+        </body></html>
+        """
+        html_win.SetPage(styled_html)
+        sizer.Add(html_win, 1, wx.EXPAND | wx.ALL, 8)
+        btn_sizer = wx.StdDialogButtonSizer()
+        ok_btn = wx.Button(dlg, wx.ID_OK)
+        ok_btn.SetDefault()
+        btn_sizer.AddButton(ok_btn)
+        btn_sizer.Realize()
+        sizer.Add(btn_sizer, 0, wx.ALIGN_RIGHT | wx.ALL, 8)
+        dlg.SetSizer(sizer)
+        dlg.Layout()
+        dlg.CentreOnParent()
         dlg.ShowModal()
         dlg.Destroy()
 
+    def ShowHelp(self):
+        """Show the keyboard and mouse controls using HtmlWindow."""
+        html = f"""
+        <h1>{APP_TITLE} - Help</h1>
+        <div class="section">
+        <h2>Mouse</h2>
+        <table>
+            <tr><td><span class="kbd">Wheel</span></td><td>Zoom in / out</td></tr>
+            <tr><td><span class="kbd">Drag</span></td><td>Pan view</td></tr>
+            <tr><td><span class="kbd">Click</span> on bar</td><td>Seek to stitch position</td></tr>
+        </table>
+        </div>
+        <div class="section">
+        <h2>Playback</h2>
+        <table>
+            <tr><td><span class="kbd">Right</span> / <span class="kbd">Left</span></td><td>Speed up / down while playing</td></tr>
+            <tr><td><span class="kbd">Alt+Right/Left</span></td><td>Move by one stitch when stopped</td></tr>
+            <tr><td><span class="kbd">Shift+Right/Left</span></td><td>Next / previous command (TRIM, COLOR CHANGE...)</td></tr>
+            <tr><td><span class="kbd">Ctrl+Right/Left</span></td><td>Next / previous color section</td></tr>
+            <tr><td><span class="kbd">Up</span> / <span class="kbd">Down</span></td><td>Fast seek (10x) when stopped</td></tr>
+            <tr><td><span class="kbd">Home</span> / <span class="kbd">End</span></td><td>First / last stitch</td></tr>
+            <tr><td><span class="kbd">Space</span></td><td>Play / pause</td></tr>
+            <tr><td><span class="kbd">Esc</span></td><td>Stop playback</td></tr>
+        </table>
+        </div>
+        <div class="section">
+        <h2>View</h2>
+        <table>
+            <tr><td><span class="kbd">C</span></td><td>Center design</td></tr>
+            <tr><td><span class="kbd">F</span></td><td>Fit design to window</td></tr>
+            <tr><td><span class="kbd">F11</span></td><td>Toggle fullscreen</td></tr>
+            <tr><td><span class="kbd">1</span></td><td>Show at physical 1:1 size</td></tr>
+            <tr><td><span class="kbd">V</span></td><td>Toggle embroidery visibility</td></tr>
+            <tr><td><span class="kbd">G</span></td><td>Toggle grid (10mm minor, 50mm major)</td></tr>
+            <tr><td><span class="kbd">N</span></td><td>Toggle needle crosshair</td></tr>
+            <tr><td><span class="kbd">J</span></td><td>Toggle jump paths (off → all → risky only)</td></tr>
+            <tr><td><span class="kbd">X</span></td><td>Toggle stitch density map</td></tr>
+            <tr><td><span class="kbd">R</span></td><td>Toggle realistic 2.5D render</td></tr>
+            <tr><td><span class="kbd">H</span></td><td>Show this help</td></tr>
+            <tr><td><span class="kbd">I</span></td><td>Show viewer settings</td></tr>
+        </table>
+        </div>
+        <div class="section">
+        <h2>Rendering</h2>
+        <table>
+            <tr><td><span class="kbd">+</span> / <span class="kbd">-</span></td><td>Change thread width</td></tr>
+            <tr><td><span class="kbd">[</span> / <span class="kbd">]</span></td><td>Change dark shading factor</td></tr>
+            <tr><td><span class="kbd">Shift+[</span> / <span class="kbd">Shift+]</span></td><td>Change light shading factor</td></tr>
+            <tr><td><span class="kbd">Ctrl+Arrows</span></td><td>Adjust thread color (HSL)</td></tr>
+        </table>
+        </div>
+        """
+        self._show_html_dialog("Help - " + APP_TITLE, html, width=620, height=640)
+
     def ShowSettings(self):
-        """Show the current viewer state and rendering parameters."""
+        """Show the current viewer state and rendering parameters using HtmlWindow."""
         total = self.stitches_np.shape[0]
         min_x, min_y, max_x, max_y = self.bounds
         width = max_x - min_x
@@ -1515,45 +1572,62 @@ class EmbroideryViewerPanel(wx.Panel):
             else "all" if self.show_jumps
             else "off"
         )
-        settings_text = (
-            f"{APP_TITLE} viewer settings\n\n"
-            f"Design\n"
-            f"  Stitches: {self.visible_count}/{total}\n"
-            f"  Color sections: {self.color_count}\n"
-            f"  Bounds: {width:.1f} x {height:.1f} mm\n\n"
-            f"Viewport\n"
-            f"  Zoom: {self.zoom:.3f}\n"
-            f"  Pan: {self.pan_x:.1f}, {self.pan_y:.1f} px\n"
-            f"  Grid: {'on' if self.show_grid else 'off'}\n"
-            f"  Embroidery: {'on' if self.show_stitches else 'off'}\n"
-            f"  Realistic render: {'on' if self.show_realistic else 'off'}\n"
-            f"  Jump paths: {jump_mode}\n"
-            f"  Density map: {density_mode}\n"
-            f"  Density radius: {DENSITY_RADIUS_MM:.1f} mm\n"
-            f"  Density warning: {DENSITY_WARNING_PER_MM2:.1f} stitches/mm2\n"
-            f"  Density critical: {DENSITY_CRITICAL_PER_MM2:.1f} stitches/mm2\n"
-            f"  Needle: {'on' if self.show_needle else 'off'}\n"
-            f"  Gradient: {'on' if self.zoom > 1.2 else 'off'}\n\n"
-            f"Rendering\n"
-            f"  Line width: {self.line_width:.1f} mm\n"
-            f"  Dark factor: {self.dark_factor:.2f}\n"
-            f"  Light factor: {self.light_factor:.2f}\n"
-            f"  Shading step: {self.shading_step:.2f}\n\n"
-            f"Playback\n"
-            f"  Step size: {self.step_size}\n"
-            f"  Timer interval: {self.play_speed} ms\n"
-            f"  Timer step: {self.play_step} stitches\n"
-            f"  Direction: {'forward' if self._last_dir > 0 else 'backward'}\n"
-            f"  Playing: {'yes' if self.is_playing else 'no'}"
-        )
-        dlg = wx.MessageDialog(
-            self,
-            settings_text,
-            "Viewer settings",
-            wx.OK | wx.ICON_INFORMATION,
-        )
-        dlg.ShowModal()
-        dlg.Destroy()
+
+        def badge(on):
+            cls = "badge-on" if on else "badge-off"
+            txt = "ON" if on else "OFF"
+            return f'<span class="badge {cls}">{txt}</span>'
+
+        def badge_text(txt, is_on):
+            cls = "badge-on" if is_on else "badge-off"
+            return f'<span class="badge {cls}">{txt}</span>'
+
+        html = f"""
+        <h1>{APP_TITLE} - Viewer Settings</h1>
+
+        <h2>Design</h2>
+        <table>
+            <tr><td>Stitches</td><td><b>{self.visible_count}</b> / {total}</td></tr>
+            <tr><td>Color sections</td><td>{self.color_count}</td></tr>
+            <tr><td>Bounds</td><td>{width:.1f} x {height:.1f} mm</td></tr>
+            <tr><td>Bounds (min)</td><td>{min_x:.1f}, {min_y:.1f} mm</td></tr>
+            <tr><td>Bounds (max)</td><td>{max_x:.1f}, {max_y:.1f} mm</td></tr>
+        </table>
+
+        <h2>Viewport</h2>
+        <table>
+            <tr><td>Zoom</td><td>{self.zoom:.3f}x</td></tr>
+            <tr><td>Pan</td><td>{self.pan_x:.1f}, {self.pan_y:.1f} px</td></tr>
+            <tr><td>Grid</td><td>{badge(self.show_grid)}</td></tr>
+            <tr><td>Embroidery</td><td>{badge(self.show_stitches)}</td></tr>
+            <tr><td>Realistic render</td><td>{badge(self.show_realistic)}</td></tr>
+            <tr><td>Jump paths</td><td>{badge_text(jump_mode, self.show_jumps)}</td></tr>
+            <tr><td>Density map</td><td>{badge_text(density_mode, self.show_density)}</td></tr>
+            <tr><td>Density radius</td><td>{DENSITY_RADIUS_MM:.1f} mm</td></tr>
+            <tr><td>Density warning</td><td>{DENSITY_WARNING_PER_MM2:.1f} /mm²</td></tr>
+            <tr><td>Density critical</td><td>{DENSITY_CRITICAL_PER_MM2:.1f} /mm²</td></tr>
+            <tr><td>Needle</td><td>{badge(self.show_needle)}</td></tr>
+            <tr><td>Gradient</td><td>{badge(self.zoom > 1.2)}</td></tr>
+        </table>
+
+        <h2>Rendering</h2>
+        <table>
+            <tr><td>Line width</td><td><b>{self.line_width:.2f}</b> mm</td></tr>
+            <tr><td>Dark factor</td><td>{self.dark_factor:.2f}</td></tr>
+            <tr><td>Light factor</td><td>{self.light_factor:.2f}</td></tr>
+            <tr><td>Shading step</td><td>{self.shading_step:.2f}</td></tr>
+        </table>
+
+        <h2>Playback</h2>
+        <table>
+            <tr><td>Step size</td><td>{self.step_size}</td></tr>
+            <tr><td>Timer interval</td><td>{self.play_speed} ms</td></tr>
+            <tr><td>Timer step</td><td>{self.play_step} stitches</td></tr>
+            <tr><td>Direction</td><td>{'forward' if self._last_dir > 0 else 'backward'}</td></tr>
+            <tr><td>Playing</td><td>{badge(self.is_playing)}</td></tr>
+        </table>
+        """
+        self._show_html_dialog("Settings - " + APP_TITLE, html, width=600, height=650)
 
     def SetStepSize(self, size):
         self.step_size = max(1, size)
