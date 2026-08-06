@@ -536,6 +536,7 @@ class EmbroideryViewerPanel(wx.Panel):
         self.show_density = False
         self.density_only = False
         self.show_jumps = False
+        self.risky_jumps_only = False
         self.show_needle = True
         self.needle_highlighted = False
         self.needle_highlight_stage = 0
@@ -915,7 +916,14 @@ class EmbroideryViewerPanel(wx.Panel):
             self.show_grid = not self.show_grid
             changed = True
         elif key in (ord("J"), ord("j")) and not is_alt and not is_ctrl:
-            self.show_jumps = not self.show_jumps
+            if not self.show_jumps:
+                self.show_jumps = True
+                self.risky_jumps_only = False
+            elif not self.risky_jumps_only:
+                self.risky_jumps_only = True
+            else:
+                self.show_jumps = False
+                self.risky_jumps_only = False
             changed = True
         elif key in (ord("X"), ord("x")) and not is_alt and not is_ctrl:
             if not self.show_density:
@@ -1012,6 +1020,11 @@ class EmbroideryViewerPanel(wx.Panel):
             else "overlay" if self.show_density
             else "off"
         )
+        jump_mode = (
+            "risky only" if self.risky_jumps_only
+            else "all" if self.show_jumps
+            else "off"
+        )
         settings_text = (
             f"{APP_TITLE} viewer settings\n\n"
             f"Design\n"
@@ -1022,7 +1035,7 @@ class EmbroideryViewerPanel(wx.Panel):
             f"  Zoom: {self.zoom:.3f}\n"
             f"  Pan: {self.pan_x:.1f}, {self.pan_y:.1f} px\n"
             f"  Grid: {'on' if self.show_grid else 'off'}\n"
-            f"  Jump paths: {'on' if self.show_jumps else 'off'}\n"
+            f"  Jump paths: {jump_mode}\n"
             f"  Density map: {density_mode}\n"
             f"  Density radius: {DENSITY_RADIUS_MM:.1f} mm\n"
             f"  Density warning: {DENSITY_WARNING_PER_MM2:.1f} stitches/mm2\n"
@@ -1263,6 +1276,8 @@ class EmbroideryViewerPanel(wx.Panel):
         if self.show_jumps:
             for x1, y1, x2, y2, risky, stitch_index in self.jump_segments:
                 if stitch_index > self.visible_count:
+                    continue
+                if self.risky_jumps_only and not risky:
                     continue
                 color = wx.Colour(220, 45, 45) if risky else wx.Colour(100, 100, 100)
                 dc.SetPen(wx.Pen(color, 2, wx.PENSTYLE_SHORT_DASH))
