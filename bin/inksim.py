@@ -158,8 +158,6 @@ def render_shaded_numba(
     # Each segment is [x1, y1, x2, y2, r, g, b] in mm + base thread color.
     # We project mm -> screen pixels using zoom/pan and then rasterize.
     h, w, _ = buf.shape
-    # The configured width is in mm; convert it to screen pixels with the
-    # world-to-screen transform so thread thickness follows the design.
     # Realistic must keep same width as shaded to avoid thick blurry look.
     minimum_line_width = 1.0
     effective_line_width = min(
@@ -169,67 +167,59 @@ def render_shaded_numba(
     hw = effective_line_width * 0.5
     lw_int = max(1, int(np.ceil(effective_line_width)))
 
+    # Precompute fixed light direction for direction-independent shading
+    light_x = -0.5
+    light_y = -0.8660254  # normalized NW light
+
     for i in range(visible_count):
-        # Convert segment endpoints from world space (mm) to screen pixels.
         x1 = stitches[i,0] * zoom + pan_x
         y1 = stitches[i,1] * zoom + pan_y
         x2 = stitches[i,2] * zoom + pan_x
         y2 = stitches[i,3] * zoom + pan_y
 
-        # Get base thread color for this segment.
         r_base = int(stitches[i, 4])
         g_base = int(stitches[i, 5])
         b_base = int(stitches[i, 6])
 
-        # Cheap reject: ignore segments completely far outside the viewport.
         if (x1 < -200 and x2 < -200) or (x1 > w+200 and x2 > w+200): continue
         if (y1 < -200 and y2 < -200) or (y1 > h+200 and y2 > h+200): continue
 
-        # Compute the segment length in pixels and sample points along it.
         dx = x2 - x1
         dy = y2 - y1
         length = np.sqrt(dx*dx + dy*dy)
         if length <= 0: continue
-        # Tangent and normal - for lighting calculation
+
+        # Tangent and normal - canonicalized to light to avoid L->R flip
         tangent_x = dx / length
         tangent_y = dy / length
         normal_x = -tangent_y
         normal_y = tangent_x
-
-        # Fixed light direction in screen space (top-left)
-        # Makes shading independent of stitch direction
-        light_x = -0.5
-        light_y = -0.8660254
-        # Canonicalize normal to point towards light - fixes flip L->R vs R->L
         if normal_x * light_x + normal_y * light_y < 0.0:
             normal_x = -normal_x
             normal_y = -normal_y
-        # Angle factor: how perpendicular is stitch to light
+
         dot_tl = tangent_x * light_x + tangent_y * light_y
         perp_sq = 1.0 - dot_tl * dot_tl
         if perp_sq < 0.0: perp_sq = 0.0
-        perp_factor = np.sqrt(perp_sq)  # 0 parallel, 1 perpendicular
+        perp_factor = np.sqrt(perp_sq)
 
-        # Precompute variants for thread shading - brighter, less contrast
+        # Brighter, less contrast for realistic
         r_dark = int(r_base * (0.85 + 0.15 * dark_factor))
         g_dark = int(g_base * (0.85 + 0.15 * dark_factor))
         b_dark = int(b_base * (0.85 + 0.15 * dark_factor))
         r_light = int(r_base + (255 - r_base) * min(1.0, light_factor + 0.10))
         g_light = int(g_base + (255 - g_base) * min(1.0, light_factor + 0.10))
         b_light = int(b_base + (255 - b_base) * min(1.0, light_factor + 0.10))
-        # Slightly brightened center
         r_bright = int(min(255, r_base * 1.08 + 12))
         g_bright = int(min(255, g_base * 1.08 + 12))
         b_bright = int(min(255, b_base * 1.08 + 12))
 
-        # Sample at most once per screen pixel; cap long segments for performance.
         steps = min(MAX_RENDER_STEPS, max(1, int(np.ceil(length))))
         for s in range(steps+1):
             t = s / steps
             x = x1 + dx * t
             y = y1 + dy * t
 
-            # Optional gradient along the segment to make stitches less flat.
             if use_shaded:
                 r = int(r_dark + (r_light - r_dark) * t)
                 g = int(g_dark + (g_light - g_dark) * t)
@@ -239,7 +229,6 @@ def render_shaded_numba(
                 g = g_base
                 b = b_base
 
-            # Fast path for thin lines (single pixel footprint).
             if lw_int <= 1 and not use_realistic:
                 xi = int(x)
                 yi = int(y)
@@ -248,7 +237,6 @@ def render_shaded_numba(
                     buf[yi, xi, 1] = g
                     buf[yi, xi, 2] = b
             else:
-                # Thick lines: draw a disk around each sampled point.
                 render_radius = hw
                 r_loop = lw_int + 1
                 for oy in range(-r_loop, r_loop + 1):
@@ -260,44 +248,35 @@ def render_shaded_numba(
                         yi = int(y + oy)
                         if 0 <= xi < w and 0 <= yi < h:
                             if use_realistic:
-                                # Cylindrical shading - stable, direction independent
                                 normal_position = ox * normal_x + oy * normal_y
                                 across = normal_position / hw if hw > 0.001 else 0.0
                                 if across < -1.0: across = -1.0
                                 if across >  1.0: across =  1.0
                                 across_abs = across if across >= 0 else -across
 
-                                # Smooth cylinder: 1 - across^2, very subtle contrast
                                 cyl = 1.0 - across_abs * across_abs * 0.7
                                 rr = int(r_dark + (r_bright - r_dark) * cyl)
                                 gg = int(g_dark + (g_bright - g_dark) * cyl)
                                 bb = int(b_dark + (b_bright - b_dark) * cyl)
 
-                                # Soft specular - wider, less white, zoom-stable
-                                # Fade out when thread is thinner than 2.5px to avoid flicker
+                                # Zoom-stable soft specular
                                 zoom_fade = (hw - 1.2) / 1.3
                                 if zoom_fade < 0.0: zoom_fade = 0.0
                                 if zoom_fade > 1.0: zoom_fade = 1.0
-
                                 if zoom_fade > 0.01:
                                     spec_center = 0.25
-                                    spec_width = 0.50  # wider = less aliasing
+                                    spec_width = 0.50
                                     spec_dist = across - spec_center
                                     if spec_dist < 0: spec_dist = -spec_dist
                                     if spec_dist < spec_width:
                                         spec = 1.0 - spec_dist / spec_width
-                                        spec = spec * spec  # soft falloff
-                                        # Fade at ends
+                                        spec = spec * spec
                                         along = t if t < 0.5 else 1.0 - t
                                         if along < 0.20:
                                             spec *= along / 0.20
-                                        # Angle modulation + zoom fade
                                         angle_mod = 0.40 + 0.60 * perp_factor
                                         spec *= angle_mod * zoom_fade
-                                        # Less aggressive: mix to light color, not pure white
-                                        # 0.35 max strength -> no white blowout
                                         spec_strength = spec * 0.32
-                                        # Mix towards a slightly warm highlight, not 255
                                         hl_r = int((rr + r_light + 255) * 0.33 + 10)
                                         hl_g = int((gg + g_light + 255) * 0.33 + 10)
                                         hl_b = int((bb + b_light + 255) * 0.33 + 10)
@@ -308,28 +287,19 @@ def render_shaded_numba(
                                         gg = int(gg * (1.0 - spec_strength) + hl_g * spec_strength)
                                         bb = int(bb * (1.0 - spec_strength) + hl_b * spec_strength)
 
-                                # Edge handling - no darkening by neighbor stitches
-                                # If this pixel is edge (dark), blend lightly, don't overwrite bright
-                                # This prevents dark seams when highlight is covered
                                 if distance_squared > (hw - 0.7)*(hw - 0.7):
-                                    # Very soft AA
                                     buf[yi, xi, 0] = (buf[yi, xi, 0] * 2 + rr) // 3
                                     buf[yi, xi, 1] = (buf[yi, xi, 1] * 2 + gg) // 3
                                     buf[yi, xi, 2] = (buf[yi, xi, 2] * 2 + bb) // 3
                                 else:
-                                    # For interior, lighten only if not overwriting brighter highlight
-                                    # Prevents dark flicker when stitches overlap
                                     if across_abs < 0.6:
-                                        # Center - always write (has highlight)
                                         buf[yi, xi, 0] = rr
                                         buf[yi, xi, 1] = gg
                                         buf[yi, xi, 2] = bb
                                     else:
-                                        # Edge - only darken if background is brighter than us
-                                        # This keeps existing highlights
                                         old_lum = buf[yi, xi, 0] + buf[yi, xi, 1] + buf[yi, xi, 2]
                                         new_lum = rr + gg + bb
-                                        if new_lum >= old_lum - 30:  # allow slight darkening only
+                                        if new_lum >= old_lum - 30:
                                             buf[yi, xi, 0] = rr
                                             buf[yi, xi, 1] = gg
                                             buf[yi, xi, 2] = bb
@@ -341,6 +311,70 @@ def render_shaded_numba(
                                 buf[yi, xi, 0] = (buf[yi, xi, 0] + r)//2
                                 buf[yi, xi, 1] = (buf[yi, xi, 1] + g)//2
                                 buf[yi, xi, 2] = (buf[yi, xi, 2] + b)//2
+
+    # Second pass: needle puncture marks for realistic mode
+    # Makes it clear where thread enters fabric, breaks satin uniformity
+    if use_realistic and effective_line_width > 1.8:
+        # Puncture size depends on zoom, but stays small
+        puncture_radius = 1
+        if hw > 2.5:
+            puncture_radius = 2
+        # Avoid drawing puncture for every segment if too dense - skip every other
+        # to reduce clutter, but still show entry points
+        for i in range(visible_count):
+            # Only draw puncture at segment end (real needle penetration)
+            # Skip if next stitch starts far away (jump) - still draw to show jump point
+            px = int(stitches[i,2] * zoom + pan_x)
+            py = int(stitches[i,3] * zoom + pan_y)
+            if px < 0 or px >= w or py < 0 or py >= h:
+                continue
+            # Simple density skip for very dense areas: draw every 2nd puncture in satin
+            # Check distance to previous puncture in screen space
+            if i > 0:
+                prev_x = int(stitches[i-1,2] * zoom + pan_x)
+                prev_y = int(stitches[i-1,3] * zoom + pan_y)
+                ddx = px - prev_x
+                ddy = py - prev_y
+                if ddx*ddx + ddy*ddy < 4:  # too close, skip to avoid blob
+                    continue
+
+            r_base = int(stitches[i, 4])
+            g_base = int(stitches[i, 5])
+            b_base = int(stitches[i, 6])
+
+            # Dark hole + slight fabric compression ring
+            # Center hole: darker
+            r_hole = int(r_base * 0.45)
+            g_hole = int(g_base * 0.45)
+            b_hole = int(b_base * 0.45)
+            # Compression ring: slightly darker than thread
+            r_ring = int(r_base * 0.75)
+            g_ring = int(g_base * 0.75)
+            b_ring = int(b_base * 0.75)
+
+            for oy in range(-puncture_radius, puncture_radius+1):
+                for ox in range(-puncture_radius, puncture_radius+1):
+                    xi = px + ox
+                    yi = py + oy
+                    if xi < 0 or xi >= w or yi < 0 or yi >= h:
+                        continue
+                    dist2 = ox*ox + oy*oy
+                    if dist2 == 0:
+                        # Center hole
+                        buf[yi, xi, 0] = r_hole
+                        buf[yi, xi, 1] = g_hole
+                        buf[yi, xi, 2] = b_hole
+                    elif dist2 == 1:
+                        # Direct neighbors - compression shadow
+                        # Blend 60% ring, 40% existing to keep underlying color
+                        buf[yi, xi, 0] = (buf[yi, xi, 0] * 2 + r_ring) // 3
+                        buf[yi, xi, 1] = (buf[yi, xi, 1] * 2 + g_ring) // 3
+                        buf[yi, xi, 2] = (buf[yi, xi, 2] * 2 + b_ring) // 3
+                    elif dist2 == 2 and puncture_radius > 1:
+                        # Diagonal for larger puncture - very subtle
+                        buf[yi, xi, 0] = (buf[yi, xi, 0] * 3 + r_ring) // 4
+                        buf[yi, xi, 1] = (buf[yi, xi, 1] * 3 + g_ring) // 4
+                        buf[yi, xi, 2] = (buf[yi, xi, 2] * 3 + b_ring) // 4
 
 
 @numba.njit
