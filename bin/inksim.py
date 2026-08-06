@@ -155,7 +155,6 @@ def render_shaded_numba(
     use_realistic=False,
 ):
     # Draw visible stitch segments into the RGB buffer.
-    # Each segment is [x1, y1, x2, y2, r, g, b] in mm + base thread color.
     h, w, _ = buf.shape
     minimum_line_width = 1.0
     effective_line_width = min(
@@ -165,9 +164,15 @@ def render_shaded_numba(
     hw = effective_line_width * 0.5
     lw_int = max(1, int(np.ceil(effective_line_width)))
 
-    # Fixed light for direction-independent shading
     light_x = -0.5
     light_y = -0.8660254
+
+    # For realistic: puncture config
+    puncture_radius = 1
+    if hw > 2.5:
+        puncture_radius = 2
+    last_puncture_x = -100000
+    last_puncture_y = -100000
 
     for i in range(visible_count):
         x1 = stitches[i,0] * zoom + pan_x
@@ -179,239 +184,216 @@ def render_shaded_numba(
         g_base = int(stitches[i, 5])
         b_base = int(stitches[i, 6])
 
-        if (x1 < -200 and x2 < -200) or (x1 > w+200 and x2 > w+200): continue
-        if (y1 < -200 and y2 < -200) or (y1 > h+200 and y2 > h+200): continue
+        if (x1 < -200 and x2 < -200) or (x1 > w+200 and x2 > w+200):
+            # Still need to handle puncture skipping for invisible stitches
+            pass
+        elif (y1 < -200 and y2 < -200) or (y1 > h+200 and y2 > h+200):
+            pass
+        else:
+            dx = x2 - x1
+            dy = y2 - y1
+            length = np.sqrt(dx*dx + dy*dy)
+            if length > 0:
+                tangent_x = dx / length
+                tangent_y = dy / length
+                normal_x = -tangent_y
+                normal_y = tangent_x
+                if normal_x * light_x + normal_y * light_y < 0.0:
+                    normal_x = -normal_x
+                    normal_y = -normal_y
+                dot_tl = tangent_x * light_x + tangent_y * light_y
+                perp_sq = 1.0 - dot_tl * dot_tl
+                if perp_sq < 0.0: perp_sq = 0.0
+                perp_factor = np.sqrt(perp_sq)
 
-        dx = x2 - x1
-        dy = y2 - y1
-        length = np.sqrt(dx*dx + dy*dy)
-        if length <= 0: continue
+                r_dark = int(r_base * (0.85 + 0.15 * dark_factor))
+                g_dark = int(g_base * (0.85 + 0.15 * dark_factor))
+                b_dark = int(b_base * (0.85 + 0.15 * dark_factor))
+                r_light = int(r_base + (255 - r_base) * min(1.0, light_factor + 0.10))
+                g_light = int(g_base + (255 - g_base) * min(1.0, light_factor + 0.10))
+                b_light = int(b_base + (255 - b_base) * min(1.0, light_factor + 0.10))
+                r_bright = int(min(255, r_base * 1.08 + 12))
+                g_bright = int(min(255, g_base * 1.08 + 12))
+                b_bright = int(min(255, b_base * 1.08 + 12))
 
-        tangent_x = dx / length
-        tangent_y = dy / length
-        normal_x = -tangent_y
-        normal_y = tangent_x
-        if normal_x * light_x + normal_y * light_y < 0.0:
-            normal_x = -normal_x
-            normal_y = -normal_y
-        dot_tl = tangent_x * light_x + tangent_y * light_y
-        perp_sq = 1.0 - dot_tl * dot_tl
-        if perp_sq < 0.0: perp_sq = 0.0
-        perp_factor = np.sqrt(perp_sq)
+                steps = min(MAX_RENDER_STEPS, max(1, int(np.ceil(length))))
+                for s in range(steps+1):
+                    t = s / steps
+                    x = x1 + dx * t
+                    y = y1 + dy * t
 
-        r_dark = int(r_base * (0.85 + 0.15 * dark_factor))
-        g_dark = int(g_base * (0.85 + 0.15 * dark_factor))
-        b_dark = int(b_base * (0.85 + 0.15 * dark_factor))
-        r_light = int(r_base + (255 - r_base) * min(1.0, light_factor + 0.10))
-        g_light = int(g_base + (255 - g_base) * min(1.0, light_factor + 0.10))
-        b_light = int(b_base + (255 - b_base) * min(1.0, light_factor + 0.10))
-        r_bright = int(min(255, r_base * 1.08 + 12))
-        g_bright = int(min(255, g_base * 1.08 + 12))
-        b_bright = int(min(255, b_base * 1.08 + 12))
-
-        steps = min(MAX_RENDER_STEPS, max(1, int(np.ceil(length))))
-        for s in range(steps+1):
-            t = s / steps
-            x = x1 + dx * t
-            y = y1 + dy * t
-
-            if use_shaded:
-                r = int(r_dark + (r_light - r_dark) * t)
-                g = int(g_dark + (g_light - g_dark) * t)
-                b = int(b_dark + (b_light - b_dark) * t)
-            else:
-                r = r_base
-                g = g_base
-                b = b_base
-
-            if lw_int <= 1 and not use_realistic:
-                xi = int(x)
-                yi = int(y)
-                if 0 <= xi < w and 0 <= yi < h:
-                    buf[yi, xi, 0] = r
-                    buf[yi, xi, 1] = g
-                    buf[yi, xi, 2] = b
-            else:
-                render_radius = hw
-                r_loop = lw_int + 1
-                for oy in range(-r_loop, r_loop + 1):
-                    for ox in range(-r_loop, r_loop + 1):
-                        distance_squared = ox*ox + oy*oy
-                        if distance_squared > render_radius*render_radius + 0.5:
-                            continue
-                        xi = int(x + ox)
-                        yi = int(y + oy)
-                        if 0 <= xi < w and 0 <= yi < h:
-                            if use_realistic:
-                                normal_position = ox * normal_x + oy * normal_y
-                                across = normal_position / hw if hw > 0.001 else 0.0
-                                if across < -1.0: across = -1.0
-                                if across >  1.0: across =  1.0
-                                across_abs = across if across >= 0 else -across
-                                cyl = 1.0 - across_abs * across_abs * 0.7
-                                rr = int(r_dark + (r_bright - r_dark) * cyl)
-                                gg = int(g_dark + (g_bright - g_dark) * cyl)
-                                bb = int(b_dark + (b_bright - b_dark) * cyl)
-
-                                zoom_fade = (hw - 1.2) / 1.3
-                                if zoom_fade < 0.0: zoom_fade = 0.0
-                                if zoom_fade > 1.0: zoom_fade = 1.0
-                                if zoom_fade > 0.01:
-                                    spec_center = 0.25
-                                    spec_width = 0.50
-                                    spec_dist = across - spec_center
-                                    if spec_dist < 0: spec_dist = -spec_dist
-                                    if spec_dist < spec_width:
-                                        spec = 1.0 - spec_dist / spec_width
-                                        spec = spec * spec
-                                        along = t if t < 0.5 else 1.0 - t
-                                        if along < 0.20:
-                                            spec *= along / 0.20
-                                        angle_mod = 0.40 + 0.60 * perp_factor
-                                        spec *= angle_mod * zoom_fade
-                                        spec_strength = spec * 0.32
-                                        hl_r = int((rr + r_light + 255) * 0.33 + 10)
-                                        hl_g = int((gg + g_light + 255) * 0.33 + 10)
-                                        hl_b = int((bb + b_light + 255) * 0.33 + 10)
-                                        if hl_r > 255: hl_r = 255
-                                        if hl_g > 255: hl_g = 255
-                                        if hl_b > 255: hl_b = 255
-                                        rr = int(rr * (1.0 - spec_strength) + hl_r * spec_strength)
-                                        gg = int(gg * (1.0 - spec_strength) + hl_g * spec_strength)
-                                        bb = int(bb * (1.0 - spec_strength) + hl_b * spec_strength)
-
-                                if distance_squared > (hw - 0.7)*(hw - 0.7):
-                                    buf[yi, xi, 0] = (buf[yi, xi, 0] * 2 + rr) // 3
-                                    buf[yi, xi, 1] = (buf[yi, xi, 1] * 2 + gg) // 3
-                                    buf[yi, xi, 2] = (buf[yi, xi, 2] * 2 + bb) // 3
-                                else:
-                                    if across_abs < 0.6:
-                                        buf[yi, xi, 0] = rr
-                                        buf[yi, xi, 1] = gg
-                                        buf[yi, xi, 2] = bb
-                                    else:
-                                        old_lum = buf[yi, xi, 0] + buf[yi, xi, 1] + buf[yi, xi, 2]
-                                        new_lum = rr + gg + bb
-                                        if new_lum >= old_lum - 30:
-                                            buf[yi, xi, 0] = rr
-                                            buf[yi, xi, 1] = gg
-                                            buf[yi, xi, 2] = bb
-                            elif distance_squared <= (hw-0.5)*(hw-0.5):
-                                buf[yi, xi, 0] = r
-                                buf[yi, xi, 1] = g
-                                buf[yi, xi, 2] = b
-                            else:
-                                buf[yi, xi, 0] = (buf[yi, xi, 0] + r)//2
-                                buf[yi, xi, 1] = (buf[yi, xi, 1] + g)//2
-                                buf[yi, xi, 2] = (buf[yi, xi, 2] + b)//2
-
-    # Second pass: punctures, but hide if covered by later stitches
-    if use_realistic and effective_line_width > 1.8:
-        puncture_radius = 1
-        if hw > 2.5:
-            puncture_radius = 2
-        cover_radius_sq = (hw + 1.0) * (hw + 1.0)
-
-        for i in range(visible_count):
-            px = int(stitches[i,2] * zoom + pan_x)
-            py = int(stitches[i,3] * zoom + pan_y)
-            if px < 0 or px >= w or py < 0 or py >= h:
-                continue
-
-            # Skip too dense punctures
-            if i > 0:
-                prev_x = int(stitches[i-1,2] * zoom + pan_x)
-                prev_y = int(stitches[i-1,3] * zoom + pan_y)
-                ddx = px - prev_x
-                ddy = py - prev_y
-                if ddx*ddx + ddy*ddy < 4:
-                    continue
-
-            # Check if this puncture is covered by any later stitch
-            # Look ahead limited window for performance (covers underlay)
-            is_covered = False
-            look_ahead = 1200
-            if visible_count - i - 1 < look_ahead:
-                look_ahead = visible_count - i - 1
-            for j in range(i+1, i+1+look_ahead):
-                # Quick bbox: if puncture far from segment j, skip
-                x1j = stitches[j,0] * zoom + pan_x
-                y1j = stitches[j,1] * zoom + pan_y
-                x2j = stitches[j,2] * zoom + pan_x
-                y2j = stitches[j,3] * zoom + pan_y
-                # Bounding box expanded by cover radius
-                min_xj = x1j
-                if x2j < min_xj: min_xj = x2j
-                max_xj = x1j
-                if x2j > max_xj: max_xj = x2j
-                min_yj = y1j
-                if y2j < min_yj: min_yj = y2j
-                max_yj = y1j
-                if y2j > max_yj: max_yj = y2j
-                if px < min_xj - hw - 2 or px > max_xj + hw + 2: continue
-                if py < min_yj - hw - 2 or py > max_yj + hw + 2: continue
-
-                # Distance point to segment
-                vx = x2j - x1j
-                vy = y2j - y1j
-                wx_ = px - x1j
-                wy_ = py - y1j
-                c1 = wx_ * vx + wy_ * vy
-                if c1 <= 0:
-                    dist2 = (px - x1j)*(px - x1j) + (py - y1j)*(py - y1j)
-                else:
-                    c2 = vx*vx + vy*vy
-                    if c2 <= c1:
-                        dist2 = (px - x2j)*(px - x2j) + (py - y2j)*(py - y2j)
+                    if use_shaded:
+                        r = int(r_dark + (r_light - r_dark) * t)
+                        g = int(g_dark + (g_light - g_dark) * t)
+                        b = int(b_dark + (b_light - b_dark) * t)
                     else:
-                        b = c1 / c2
-                        pbx = x1j + b * vx
-                        pby = y1j + b * vy
-                        dist2 = (px - pbx)*(px - pbx) + (py - pby)*(py - pby)
+                        r = r_base
+                        g = g_base
+                        b = b_base
 
-                # If puncture lies within thread of later stitch, and not at shared endpoint
-                # Shared endpoint means same position as stitch j start (thread continues)
-                # Allow 1.5px tolerance for shared point
-                same_point_dist2 = (px - int(x1j))*(px - int(x1j)) + (py - int(y1j))*(py - int(y1j))
-                if same_point_dist2 < 3:
-                    continue
+                    if lw_int <= 1 and not use_realistic:
+                        xi = int(x)
+                        yi = int(y)
+                        if 0 <= xi < w and 0 <= yi < h:
+                            buf[yi, xi, 0] = r
+                            buf[yi, xi, 1] = g
+                            buf[yi, xi, 2] = b
+                    else:
+                        render_radius = hw
+                        r_loop = lw_int + 1
+                        for oy in range(-r_loop, r_loop + 1):
+                            for ox in range(-r_loop, r_loop + 1):
+                                distance_squared = ox*ox + oy*oy
+                                if distance_squared > render_radius*render_radius + 0.5:
+                                    continue
+                                xi = int(x + ox)
+                                yi = int(y + oy)
+                                if 0 <= xi < w and 0 <= yi < h:
+                                    if use_realistic:
+                                        normal_position = ox * normal_x + oy * normal_y
+                                        across = normal_position / hw if hw > 0.001 else 0.0
+                                        if across < -1.0: across = -1.0
+                                        if across >  1.0: across =  1.0
+                                        across_abs = across if across >= 0 else -across
+                                        cyl = 1.0 - across_abs * across_abs * 0.7
+                                        rr = int(r_dark + (r_bright - r_dark) * cyl)
+                                        gg = int(g_dark + (g_bright - g_dark) * cyl)
+                                        bb = int(b_dark + (b_bright - b_dark) * cyl)
 
-                if dist2 <= cover_radius_sq:
-                    is_covered = True
-                    break
+                                        zoom_fade = (hw - 1.2) / 1.3
+                                        if zoom_fade < 0.0: zoom_fade = 0.0
+                                        if zoom_fade > 1.0: zoom_fade = 1.0
+                                        if zoom_fade > 0.01:
+                                            spec_center = 0.25
+                                            spec_width = 0.50
+                                            spec_dist = across - spec_center
+                                            if spec_dist < 0: spec_dist = -spec_dist
+                                            if spec_dist < spec_width:
+                                                spec = 1.0 - spec_dist / spec_width
+                                                spec = spec * spec
+                                                along = t if t < 0.5 else 1.0 - t
+                                                if along < 0.20:
+                                                    spec *= along / 0.20
+                                                angle_mod = 0.40 + 0.60 * perp_factor
+                                                spec *= angle_mod * zoom_fade
+                                                spec_strength = spec * 0.32
+                                                hl_r = int((rr + r_light + 255) * 0.33 + 10)
+                                                hl_g = int((gg + g_light + 255) * 0.33 + 10)
+                                                hl_b = int((bb + b_light + 255) * 0.33 + 10)
+                                                if hl_r > 255: hl_r = 255
+                                                if hl_g > 255: hl_g = 255
+                                                if hl_b > 255: hl_b = 255
+                                                rr = int(rr * (1.0 - spec_strength) + hl_r * spec_strength)
+                                                gg = int(gg * (1.0 - spec_strength) + hl_g * spec_strength)
+                                                bb = int(bb * (1.0 - spec_strength) + hl_b * spec_strength)
 
-            if is_covered:
-                continue
+                                        if distance_squared > (hw - 0.7)*(hw - 0.7):
+                                            buf[yi, xi, 0] = (buf[yi, xi, 0] * 2 + rr) // 3
+                                            buf[yi, xi, 1] = (buf[yi, xi, 1] * 2 + gg) // 3
+                                            buf[yi, xi, 2] = (buf[yi, xi, 2] * 2 + bb) // 3
+                                        else:
+                                            if across_abs < 0.6:
+                                                buf[yi, xi, 0] = rr
+                                                buf[yi, xi, 1] = gg
+                                                buf[yi, xi, 2] = bb
+                                            else:
+                                                old_lum = buf[yi, xi, 0] + buf[yi, xi, 1] + buf[yi, xi, 2]
+                                                new_lum = rr + gg + bb
+                                                if new_lum >= old_lum - 30:
+                                                    buf[yi, xi, 0] = rr
+                                                    buf[yi, xi, 1] = gg
+                                                    buf[yi, xi, 2] = bb
+                                    elif distance_squared <= (hw-0.5)*(hw-0.5):
+                                        buf[yi, xi, 0] = r
+                                        buf[yi, xi, 1] = g
+                                        buf[yi, xi, 2] = b
+                                    else:
+                                        buf[yi, xi, 0] = (buf[yi, xi, 0] + r)//2
+                                        buf[yi, xi, 1] = (buf[yi, xi, 1] + g)//2
+                                        buf[yi, xi, 2] = (buf[yi, xi, 2] + b)//2
 
-            r_base = int(stitches[i, 4])
-            g_base = int(stitches[i, 5])
-            b_base = int(stitches[i, 6])
-            r_hole = int(r_base * 0.45)
-            g_hole = int(g_base * 0.45)
-            b_hole = int(b_base * 0.45)
-            r_ring = int(r_base * 0.75)
-            g_ring = int(g_base * 0.75)
-            b_ring = int(b_base * 0.75)
+        # ---- Puncture handling: draw puncture from previous stitch AFTER current stitch ----
+        # This way puncture is on top of both stitches sharing it, but will be naturally
+        # overdrawn by any later stitch that crosses it (including top layer over underlay).
+        # No lookahead needed - natural overdraw does the occlusion.
+        if use_realistic and effective_line_width > 1.8 and i > 0:
+            # Puncture position is end of previous stitch (junction)
+            # Use i-1 stitch end
+            px = int(stitches[i-1,2] * zoom + pan_x)
+            py = int(stitches[i-1,3] * zoom + pan_y)
+            if px >= 0 and px < w and py >= 0 and py < h:
+                # Skip if too close to last drawn puncture (dense satin)
+                ddx = px - last_puncture_x
+                ddy = py - last_puncture_y
+                if ddx*ddx + ddy*ddy >= 4:
+                    r_pb = int(stitches[i-1, 4])
+                    g_pb = int(stitches[i-1, 5])
+                    b_pb = int(stitches[i-1, 6])
+                    r_hole = int(r_pb * 0.45)
+                    g_hole = int(g_pb * 0.45)
+                    b_hole = int(b_pb * 0.45)
+                    r_ring = int(r_pb * 0.75)
+                    g_ring = int(g_pb * 0.75)
+                    b_ring = int(b_pb * 0.75)
 
-            for oy in range(-puncture_radius, puncture_radius+1):
-                for ox in range(-puncture_radius, puncture_radius+1):
-                    xi = px + ox
-                    yi = py + oy
-                    if xi < 0 or xi >= w or yi < 0 or yi >= h:
-                        continue
-                    dist2 = ox*ox + oy*oy
-                    if dist2 == 0:
-                        buf[yi, xi, 0] = r_hole
-                        buf[yi, xi, 1] = g_hole
-                        buf[yi, xi, 2] = b_hole
-                    elif dist2 == 1:
-                        buf[yi, xi, 0] = (buf[yi, xi, 0] * 2 + r_ring) // 3
-                        buf[yi, xi, 1] = (buf[yi, xi, 1] * 2 + g_ring) // 3
-                        buf[yi, xi, 2] = (buf[yi, xi, 2] * 2 + b_ring) // 3
-                    elif dist2 == 2 and puncture_radius > 1:
-                        buf[yi, xi, 0] = (buf[yi, xi, 0] * 3 + r_ring) // 4
-                        buf[yi, xi, 1] = (buf[yi, xi, 1] * 3 + g_ring) // 4
-                        buf[yi, xi, 2] = (buf[yi, xi, 2] * 3 + b_ring) // 4
+                    for oy in range(-puncture_radius, puncture_radius+1):
+                        for ox in range(-puncture_radius, puncture_radius+1):
+                            xi = px + ox
+                            yi = py + oy
+                            if xi < 0 or xi >= w or yi < 0 or yi >= h:
+                                continue
+                            dist2 = ox*ox + oy*oy
+                            if dist2 == 0:
+                                buf[yi, xi, 0] = r_hole
+                                buf[yi, xi, 1] = g_hole
+                                buf[yi, xi, 2] = b_hole
+                            elif dist2 == 1:
+                                buf[yi, xi, 0] = (buf[yi, xi, 0] * 2 + r_ring) // 3
+                                buf[yi, xi, 1] = (buf[yi, xi, 1] * 2 + g_ring) // 3
+                                buf[yi, xi, 2] = (buf[yi, xi, 2] * 2 + b_ring) // 3
+                            elif dist2 == 2 and puncture_radius > 1:
+                                buf[yi, xi, 0] = (buf[yi, xi, 0] * 3 + r_ring) // 4
+                                buf[yi, xi, 1] = (buf[yi, xi, 1] * 3 + g_ring) // 4
+                                buf[yi, xi, 2] = (buf[yi, xi, 2] * 3 + b_ring) // 4
+                    last_puncture_x = px
+                    last_puncture_y = py
+
+    # Final puncture at the very end of design
+    if use_realistic and effective_line_width > 1.8 and visible_count > 0:
+        px = int(stitches[visible_count-1,2] * zoom + pan_x)
+        py = int(stitches[visible_count-1,3] * zoom + pan_y)
+        if px >= 0 and px < w and py >= 0 and py < h:
+            ddx = px - last_puncture_x
+            ddy = py - last_puncture_y
+            if ddx*ddx + ddy*ddy >= 4:
+                r_pb = int(stitches[visible_count-1, 4])
+                g_pb = int(stitches[visible_count-1, 5])
+                b_pb = int(stitches[visible_count-1, 6])
+                r_hole = int(r_pb * 0.45)
+                g_hole = int(g_pb * 0.45)
+                b_hole = int(b_pb * 0.45)
+                r_ring = int(r_pb * 0.75)
+                g_ring = int(g_pb * 0.75)
+                b_ring = int(b_pb * 0.75)
+                for oy in range(-puncture_radius, puncture_radius+1):
+                    for ox in range(-puncture_radius, puncture_radius+1):
+                        xi = px + ox
+                        yi = py + oy
+                        if xi < 0 or xi >= w or yi < 0 or yi >= h:
+                            continue
+                        dist2 = ox*ox + oy*oy
+                        if dist2 == 0:
+                            buf[yi, xi, 0] = r_hole
+                            buf[yi, xi, 1] = g_hole
+                            buf[yi, xi, 2] = b_hole
+                        elif dist2 == 1:
+                            buf[yi, xi, 0] = (buf[yi, xi, 0] * 2 + r_ring) // 3
+                            buf[yi, xi, 1] = (buf[yi, xi, 1] * 2 + g_ring) // 3
+                            buf[yi, xi, 2] = (buf[yi, xi, 2] * 2 + b_ring) // 3
+                        elif dist2 == 2 and puncture_radius > 1:
+                            buf[yi, xi, 0] = (buf[yi, xi, 0] * 3 + r_ring) // 4
+                            buf[yi, xi, 1] = (buf[yi, xi, 1] * 3 + g_ring) // 4
+                            buf[yi, xi, 2] = (buf[yi, xi, 2] * 3 + b_ring) // 4
 
 
 @numba.njit
