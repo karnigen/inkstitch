@@ -190,44 +190,37 @@ def render_shaded_numba(
         dy = y2 - y1
         length = np.sqrt(dx*dx + dy*dy)
         if length <= 0: continue
-        # Tangent (along stitch) and normal (across stitch)
+        # Tangent and normal - for lighting calculation
         tangent_x = dx / length
         tangent_y = dy / length
         normal_x = -tangent_y
         normal_y = tangent_x
 
-        # Fixed light direction in screen space (top-left, like classic UI)
-        # This makes shading direction-independent.
+        # Fixed light direction in screen space (top-left)
+        # Makes shading independent of stitch direction
         light_x = -0.5
-        light_y = -0.8660254  # sin 60 deg, normalized vector
-
-        # Canonicalize normal to always point towards light.
-        # This removes flip when stitch goes left->right vs right->left.
+        light_y = -0.8660254
+        # Canonicalize normal to point towards light - fixes flip L->R vs R->L
         if normal_x * light_x + normal_y * light_y < 0.0:
             normal_x = -normal_x
             normal_y = -normal_y
-
-        # How much the stitch is perpendicular to light.
-        # For a cylinder, highlight is strongest when tangent is perpendicular to light.
-        # dot_tl = tangent dot light
+        # Angle factor: how perpendicular is stitch to light
         dot_tl = tangent_x * light_x + tangent_y * light_y
-        # perp_factor = sin(angle) = sqrt(1 - cos^2)
-        perp_factor_sq = 1.0 - dot_tl * dot_tl
-        if perp_factor_sq < 0.0: perp_factor_sq = 0.0
-        perp_factor = np.sqrt(perp_factor_sq)  # 0 = parallel, 1 = perpendicular
+        perp_sq = 1.0 - dot_tl * dot_tl
+        if perp_sq < 0.0: perp_sq = 0.0
+        perp_factor = np.sqrt(perp_sq)  # 0 parallel, 1 perpendicular
 
-        # Precompute variants for thread shading.
-        # For realistic we want brighter variants, not dark mush.
-        r_dark = int(r_base * (0.75 + 0.25 * dark_factor))
-        g_dark = int(g_base * (0.75 + 0.25 * dark_factor))
-        b_dark = int(b_base * (0.75 + 0.25 * dark_factor))
-        r_light = int(r_base + (255 - r_base) * min(1.0, light_factor + 0.15))
-        g_light = int(g_base + (255 - g_base) * min(1.0, light_factor + 0.15))
-        b_light = int(b_base + (255 - b_base) * min(1.0, light_factor + 0.15))
-        # Brightened version for satin sheen
-        r_bright = int(min(255, r_base * 1.15 + 20))
-        g_bright = int(min(255, g_base * 1.15 + 20))
-        b_bright = int(min(255, b_base * 1.15 + 20))
+        # Precompute variants for thread shading - brighter, less contrast
+        r_dark = int(r_base * (0.85 + 0.15 * dark_factor))
+        g_dark = int(g_base * (0.85 + 0.15 * dark_factor))
+        b_dark = int(b_base * (0.85 + 0.15 * dark_factor))
+        r_light = int(r_base + (255 - r_base) * min(1.0, light_factor + 0.10))
+        g_light = int(g_base + (255 - g_base) * min(1.0, light_factor + 0.10))
+        b_light = int(b_base + (255 - b_base) * min(1.0, light_factor + 0.10))
+        # Slightly brightened center
+        r_bright = int(min(255, r_base * 1.08 + 12))
+        g_bright = int(min(255, g_base * 1.08 + 12))
+        b_bright = int(min(255, b_base * 1.08 + 12))
 
         # Sample at most once per screen pixel; cap long segments for performance.
         steps = min(MAX_RENDER_STEPS, max(1, int(np.ceil(length))))
@@ -267,54 +260,79 @@ def render_shaded_numba(
                         yi = int(y + oy)
                         if 0 <= xi < w and 0 <= yi < h:
                             if use_realistic:
-                                # Cylindrical shading - bright center, slightly darker edges
-                                # across is now canonical (light side = +1) independent of stitch direction
+                                # Cylindrical shading - stable, direction independent
                                 normal_position = ox * normal_x + oy * normal_y
                                 across = normal_position / hw if hw > 0.001 else 0.0
                                 if across < -1.0: across = -1.0
                                 if across >  1.0: across =  1.0
                                 across_abs = across if across >= 0 else -across
 
-                                # Smooth cylinder: 1 - across^2
-                                cyl = 1.0 - across_abs * across_abs
-                                # Mix dark edge -> bright center
+                                # Smooth cylinder: 1 - across^2, very subtle contrast
+                                cyl = 1.0 - across_abs * across_abs * 0.7
                                 rr = int(r_dark + (r_bright - r_dark) * cyl)
                                 gg = int(g_dark + (g_bright - g_dark) * cyl)
                                 bb = int(b_dark + (b_bright - b_dark) * cyl)
 
-                                # Specular highlight - always on light side, stable regardless of direction
-                                # Light side is +towards light after canonicalization
-                                spec_center = 0.30  # on light side (positive)
-                                spec_width = 0.28
-                                spec_dist = across - spec_center
-                                if spec_dist < 0: spec_dist = -spec_dist
-                                if spec_dist < spec_width:
-                                    spec = 1.0 - spec_dist / spec_width
-                                    spec = spec * spec
-                                    # Fade near ends
-                                    along = t if t < 0.5 else 1.0 - t
-                                    if along < 0.15:
-                                        spec *= along / 0.15
-                                    # Modulate by angle between stitch and light
-                                    # When stitch is perpendicular to light, highlight is strongest
-                                    # When parallel, highlight fades - physically correct for cylinder
-                                    angle_mod = 0.35 + 0.65 * perp_factor
-                                    spec *= angle_mod
-                                    # Add white specular
-                                    spec_strength = spec * 0.75
-                                    rr = int(rr + (255 - rr) * spec_strength)
-                                    gg = int(gg + (255 - gg) * spec_strength)
-                                    bb = int(bb + (255 - bb) * spec_strength)
+                                # Soft specular - wider, less white, zoom-stable
+                                # Fade out when thread is thinner than 2.5px to avoid flicker
+                                zoom_fade = (hw - 1.2) / 1.3
+                                if zoom_fade < 0.0: zoom_fade = 0.0
+                                if zoom_fade > 1.0: zoom_fade = 1.0
 
-                                # Soft AA on edge only
-                                if distance_squared > (hw - 0.6)*(hw - 0.6):
-                                    buf[yi, xi, 0] = (buf[yi, xi, 0] + rr) // 2
-                                    buf[yi, xi, 1] = (buf[yi, xi, 1] + gg) // 2
-                                    buf[yi, xi, 2] = (buf[yi, xi, 2] + bb) // 2
+                                if zoom_fade > 0.01:
+                                    spec_center = 0.25
+                                    spec_width = 0.50  # wider = less aliasing
+                                    spec_dist = across - spec_center
+                                    if spec_dist < 0: spec_dist = -spec_dist
+                                    if spec_dist < spec_width:
+                                        spec = 1.0 - spec_dist / spec_width
+                                        spec = spec * spec  # soft falloff
+                                        # Fade at ends
+                                        along = t if t < 0.5 else 1.0 - t
+                                        if along < 0.20:
+                                            spec *= along / 0.20
+                                        # Angle modulation + zoom fade
+                                        angle_mod = 0.40 + 0.60 * perp_factor
+                                        spec *= angle_mod * zoom_fade
+                                        # Less aggressive: mix to light color, not pure white
+                                        # 0.35 max strength -> no white blowout
+                                        spec_strength = spec * 0.32
+                                        # Mix towards a slightly warm highlight, not 255
+                                        hl_r = int((rr + r_light + 255) * 0.33 + 10)
+                                        hl_g = int((gg + g_light + 255) * 0.33 + 10)
+                                        hl_b = int((bb + b_light + 255) * 0.33 + 10)
+                                        if hl_r > 255: hl_r = 255
+                                        if hl_g > 255: hl_g = 255
+                                        if hl_b > 255: hl_b = 255
+                                        rr = int(rr * (1.0 - spec_strength) + hl_r * spec_strength)
+                                        gg = int(gg * (1.0 - spec_strength) + hl_g * spec_strength)
+                                        bb = int(bb * (1.0 - spec_strength) + hl_b * spec_strength)
+
+                                # Edge handling - no darkening by neighbor stitches
+                                # If this pixel is edge (dark), blend lightly, don't overwrite bright
+                                # This prevents dark seams when highlight is covered
+                                if distance_squared > (hw - 0.7)*(hw - 0.7):
+                                    # Very soft AA
+                                    buf[yi, xi, 0] = (buf[yi, xi, 0] * 2 + rr) // 3
+                                    buf[yi, xi, 1] = (buf[yi, xi, 1] * 2 + gg) // 3
+                                    buf[yi, xi, 2] = (buf[yi, xi, 2] * 2 + bb) // 3
                                 else:
-                                    buf[yi, xi, 0] = rr
-                                    buf[yi, xi, 1] = gg
-                                    buf[yi, xi, 2] = bb
+                                    # For interior, lighten only if not overwriting brighter highlight
+                                    # Prevents dark flicker when stitches overlap
+                                    if across_abs < 0.6:
+                                        # Center - always write (has highlight)
+                                        buf[yi, xi, 0] = rr
+                                        buf[yi, xi, 1] = gg
+                                        buf[yi, xi, 2] = bb
+                                    else:
+                                        # Edge - only darken if background is brighter than us
+                                        # This keeps existing highlights
+                                        old_lum = buf[yi, xi, 0] + buf[yi, xi, 1] + buf[yi, xi, 2]
+                                        new_lum = rr + gg + bb
+                                        if new_lum >= old_lum - 30:  # allow slight darkening only
+                                            buf[yi, xi, 0] = rr
+                                            buf[yi, xi, 1] = gg
+                                            buf[yi, xi, 2] = bb
                             elif distance_squared <= (hw-0.5)*(hw-0.5):
                                 buf[yi, xi, 0] = r
                                 buf[yi, xi, 1] = g
