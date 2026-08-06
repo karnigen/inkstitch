@@ -2395,17 +2395,20 @@ if __name__ == "__main__":
         help="Window position, for example 100,50",
     )
     parser.add_argument(
-        "--export-png",
+        "--simple-png",
+        dest="export_png",
         metavar="PATH",
         help="Export a clean print PNG and exit",
     )
     parser.add_argument(
-        "--export-shaded-png", "--png",
+        "--png",
+        dest="export_shaded_png",
         metavar="PATH",
         help="Export a shaded print PNG and exit",
     )
     parser.add_argument(
-        "--export-icon", "--icon",
+        "--icon",
+        dest="export_icon",
         metavar="PATH",
         help="Export a clean 256px preview PNG and exit",
     )
@@ -2413,16 +2416,18 @@ if __name__ == "__main__":
         "--dpi",
         type=int,
         default=300,
-        help="DPI for --export-png (default: 300)",
+        help="DPI for --simple-png or --png (default: 300)",
     )
     parser.add_argument(
-        "--export-background", "--bg",
+        "--bg",
+        dest="export_background",
         choices=("transparent", "white"),
         default="transparent",
         help="PNG background (default: transparent)",
     )
     parser.add_argument(
-        "--export-grid", "--grid",
+        "--grid",
+        dest="export_grid",
         action="store_true",
         help="Add a 10 mm grid to exported PNG",
     )
@@ -2444,7 +2449,7 @@ if __name__ == "__main__":
     if export_requested and not args.input_file:
         parser.error(
             "an input embroidery file is required for export; "
-            "use: inksim INPUT_FILE --export-png OUTPUT.png"
+            "use: inksim INPUT_FILE --simple-png OUTPUT.png"
         )
     if args.input_file and not Path(args.input_file).is_file():
         parser.error(f"input embroidery file not found: {args.input_file}")
