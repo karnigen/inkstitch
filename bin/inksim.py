@@ -444,15 +444,16 @@ class EmbroideryFileDropTarget(wx.FileDropTarget):
 class EmbroideryOpenDialog(wx.Dialog):
     """Browse embroidery files with an in-app design preview."""
 
-    def __init__(self, parent, initial_directory):
+    def __init__(self, parent, initial_directory, selected_file=None):
         super().__init__(parent, title="Open embroidery file", size=(1100, 720))
         self.selected_path = None
         self.current_directory = Path(initial_directory or Path.cwd()).resolve()
+        self.initial_file = Path(selected_file).resolve() if selected_file else None
         self.extensions = get_supported_input_extensions()
 
         root_sizer = wx.BoxSizer(wx.VERTICAL)
         directory_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.directory_text = wx.TextCtrl(
+        self.directory_text = wx.ComboBox(
             self,
             value=str(self.current_directory),
             style=wx.TE_PROCESS_ENTER,
@@ -484,6 +485,7 @@ class EmbroideryOpenDialog(wx.Dialog):
         self.file_list.Bind(wx.EVT_LISTBOX, self.OnSelect)
         self.file_list.Bind(wx.EVT_LISTBOX_DCLICK, self.OnOpen)
         self.directory_text.Bind(wx.EVT_TEXT_ENTER, self.OnDirectoryEnter)
+        self.directory_text.Bind(wx.EVT_COMBOBOX, self.OnDirectoryEnter)
         up_button.Bind(wx.EVT_BUTTON, self.OnUp)
         browse_button.Bind(wx.EVT_BUTTON, self.OnBrowse)
         self.Bind(wx.EVT_BUTTON, self.OnOpen, id=wx.ID_OK)
@@ -495,7 +497,13 @@ class EmbroideryOpenDialog(wx.Dialog):
         """Refresh the list for the current directory."""
         if not self.current_directory.is_dir():
             return
-        self.directory_text.ChangeValue(str(self.current_directory))
+        directories = sorted(
+            (path for path in self.current_directory.iterdir() if path.is_dir()),
+            key=lambda path: path.name.lower(),
+        )
+        directory_choices = [str(self.current_directory), *(str(path) for path in directories)]
+        self.directory_text.SetItems(directory_choices)
+        self.directory_text.SetValue(str(self.current_directory))
         files = sorted(
             (
                 path for path in self.current_directory.iterdir()
@@ -506,7 +514,13 @@ class EmbroideryOpenDialog(wx.Dialog):
         self.file_list.Set([path.name for path in files])
         self.file_paths = files
         if files:
-            self.file_list.SetSelection(0)
+            selected_index = 0
+            if self.initial_file:
+                for index, path in enumerate(files):
+                    if path == self.initial_file:
+                        selected_index = index
+                        break
+            self.file_list.SetSelection(selected_index)
             self.OnSelect(None)
 
     def OnSelect(self, event):
@@ -531,8 +545,9 @@ class EmbroideryOpenDialog(wx.Dialog):
     def SetDirectory(self, directory):
         """Change directory if it exists."""
         path = Path(directory).expanduser().resolve()
-        if path.is_dir():
+        if path.is_dir() and path != self.current_directory:
             self.current_directory = path
+            self.initial_file = None
             self.RefreshFiles()
 
     def OnUp(self, event):
@@ -1727,8 +1742,10 @@ class Frame(wx.Frame):
         # TODO: Consider migrating wx.Config to an explicit XDG config path.
         self.config = wx.Config(APP_TITLE)
         self.last_directory = self.config.Read("last_directory", "")
+        self.current_file_path = None
         if initial_file and Path(initial_file).is_file():
-            self.last_directory = str(Path(initial_file).resolve().parent)
+            self.current_file_path = Path(initial_file).resolve()
+            self.last_directory = str(self.current_file_path.parent)
             self.config.Write("last_directory", self.last_directory)
             self.config.Flush()
 
@@ -1950,7 +1967,11 @@ class Frame(wx.Frame):
 
     def OnOpen(self, e):
         """Prompt for an embroidery file and update the window metadata."""
-        dlg = EmbroideryOpenDialog(self, self.last_directory)
+        dlg = EmbroideryOpenDialog(
+            self,
+            self.last_directory,
+            self.current_file_path,
+        )
         if dlg.ShowModal() == wx.ID_OK:
             self.OpenFile(dlg.GetPath())
         dlg.Destroy()
@@ -2021,6 +2042,7 @@ class Frame(wx.Frame):
         selected_path = Path(path).resolve()
         if not self.viewer.LoadDesign(str(selected_path), fit_to_screen=True):
             return False
+        self.current_file_path = selected_path
         self.last_directory = str(selected_path.parent)
         self.config.Write("last_directory", self.last_directory)
         self.config.Flush()
