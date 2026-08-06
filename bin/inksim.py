@@ -640,7 +640,7 @@ class ModeStatusPanel(wx.Panel):
         sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.buttons = {}
         for mode in ("R", "X", "J", "V"):
-            button = wx.ToggleButton(self, label=mode, size=(32, 32))
+            button = wx.Button(self, label=mode, size=(32, 32))
             button.SetMinSize((32, 32))
             button.Bind(wx.EVT_BUTTON, self.OnModeClick)
             self.buttons[mode] = button
@@ -652,6 +652,7 @@ class ModeStatusPanel(wx.Panel):
         for mode, button in self.buttons.items():
             if event.GetEventObject() is button:
                 self.viewer.ToggleDisplayMode(mode)
+                self.viewer.SetFocus()
                 return
 
     def RefreshIndicators(self):
@@ -665,7 +666,6 @@ class ModeStatusPanel(wx.Panel):
             jump_state = 2 if self.viewer.risky_jumps_only else 1
         for mode, button in self.buttons.items():
             state = jump_state if mode == "J" else int(states[mode])
-            button.SetValue(bool(state))
             if mode == "J" and state == 2:
                 color = wx.Colour(210, 145, 45)
             elif state:
