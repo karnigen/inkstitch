@@ -744,6 +744,16 @@ class EmbroideryViewerPanel(wx.Panel):
         """Handle playback, navigation, display, and view shortcut keys."""
         now = time.time()
         key = e.GetKeyCode()
+        is_alt = e.AltDown()
+        is_ctrl = e.ControlDown()
+        # Let menu mnemonics and global shortcuts pass through
+        # Alt+F, Alt+P for menu, Ctrl+Q for Quit, Ctrl+O for Open etc.
+        if is_alt and key in (ord('F'), ord('f'), ord('P'), ord('p')):
+            e.Skip()
+            return
+        if is_ctrl and key in (ord('Q'), ord('q'), ord('O'), ord('o')):
+            e.Skip()
+            return
         is_space_or_c = key in (
             wx.WXK_SPACE,
             ord("C"),
@@ -752,14 +762,12 @@ class EmbroideryViewerPanel(wx.Panel):
         if (
             not is_space_or_c
             and now - self._last_key_time < self._key_throttle
-            and not e.AltDown()
-            and not e.ControlDown()
+            and not is_alt
+            and not is_ctrl
         ):
             return
         self._last_key_time = now
         total = self.stitches_np.shape[0]
-        is_alt = e.AltDown()
-        is_ctrl = e.ControlDown()
         is_shift = e.ShiftDown()
         changed = False
         highlight_needle = False
@@ -840,13 +848,13 @@ class EmbroideryViewerPanel(wx.Panel):
                     min(1.0, self.dark_factor + shading_delta),
                 )
             changed = True
-        elif key in (ord("C"), ord("c")):
+        elif key in (ord("C"), ord("c")) and not is_alt and not is_ctrl:
             self.CenterDesign()
             return
-        elif key in (ord("F"), ord("f")):
+        elif key in (ord("F"), ord("f")) and not is_alt and not is_ctrl:
             self.FitToScreen()
             return
-        elif key == ord("1"):
+        elif key == ord("1") and not is_alt and not is_ctrl:
             self.SetOneToOne()
             return
         elif key == wx.WXK_F11:
@@ -854,28 +862,28 @@ class EmbroideryViewerPanel(wx.Panel):
             if hasattr(frame, "ToggleFullScreen"):
                 frame.ToggleFullScreen()
                 return
-        elif key in (ord("G"), ord("g")):
+        elif key in (ord("G"), ord("g")) and not is_alt and not is_ctrl:
             self.show_grid = not self.show_grid
             changed = True
-        elif key in (ord("J"), ord("j")):
+        elif key in (ord("J"), ord("j")) and not is_alt and not is_ctrl:
             self.show_jumps = not self.show_jumps
             changed = True
-        elif key in (ord("X"), ord("x")):
+        elif key in (ord("X"), ord("x")) and not is_alt and not is_ctrl:
             self.show_density = not self.show_density
             if self.show_density and not self.density_ready:
                 self.CalculateStitchDensity()
             changed = True
-        elif key in (ord("N"), ord("n")):
+        elif key in (ord("N"), ord("n")) and not is_alt and not is_ctrl:
             self.show_needle = not self.show_needle
             if self.show_needle:
                 self.HighlightNeedle()
             else:
                 self.StopNeedleHighlight()
             changed = True
-        elif key in (ord("H"), ord("h")):
+        elif key in (ord("H"), ord("h")) and not is_alt and not is_ctrl:
             self.ShowHelp()
             return
-        elif key in (ord("I"), ord("i")):
+        elif key in (ord("I"), ord("i")) and not is_alt and not is_ctrl:
             self.ShowSettings()
             return
         elif key == wx.WXK_ESCAPE:
@@ -1395,22 +1403,22 @@ class Frame(wx.Frame):
         menubar.Append(playbackMenu, "&Playback")
         self.SetMenuBar(menubar)
 
-        # Keep references for Alt+F / Alt+P handling
+        # Store menubar reference for key handling
         self.menubar = menubar
         self.fileMenu = fileMenu
         self.playbackMenu = playbackMenu
 
         # Global accelerators
-        # Alt+F / Alt+P are handled by mnemonics in menu titles (&File / &Playback)
-        # - wxWidgets automatically exposes them as Alt+F and Alt+P.
+        # Alt+F / Alt+P are handled by mnemonics in menu titles (&File / &Playback).
+        # wxWidgets automatically exposes them as Alt+F and Alt+P.
         # Ctrl+Q for Quit is added explicitly via AcceleratorTable.
         accel_tbl = wx.AcceleratorTable([
             (wx.ACCEL_CTRL, ord('Q'), quitItem.GetId()),
         ])
         self.SetAcceleratorTable(accel_tbl)
 
-        # Ensure Alt+F and Alt+P work even when EmbroideryViewerPanel has focus
-        # (it has its own key handler). CHAR_HOOK on the frame intercepts keys earlier.
+        # Ensure Ctrl+Q works even when viewer has focus.
+        # Alt+F / Alt+P are left to native menu bar mnemonics (no PopupMenu on attached menu).
         self.Bind(wx.EVT_CHAR_HOOK, self.OnCharHook)
 
         # Bind menu items to their handlers.
@@ -1525,33 +1533,20 @@ class Frame(wx.Frame):
         """Global keyboard shortcuts for menu.
 
         - Ctrl+Q -> Quit
-        - Alt+F -> open File menu
-        - Alt+P -> open Playback menu
+        - Alt+F / Alt+P are handled natively by menubar mnemonics (&File, &Playback)
+          so we just skip them here to let wxWidgets process them.
         """
         kc = e.GetKeyCode()
         # Ctrl+Q
-        if e.ControlDown() and kc == ord('Q'):
+        if e.ControlDown() and kc in (ord('Q'), ord('q')):
             self.Close()
             return
-        # Alt+F / Alt+P - works even when viewer has focus
-        if e.AltDown() and not e.ControlDown():
-            if kc == ord('F'):
-                # Try to activate via PopupMenu as fallback
-                try:
-                    # On GTK the menu opens near the menubar
-                    pos = self.ClientToScreen((5, 5))
-                    self.PopupMenu(self.fileMenu, self.ScreenToClient(pos))
-                except Exception:
-                    pass
-                return
-            if kc == ord('P'):
-                try:
-                    # Approximate position of second menu
-                    pos = self.ClientToScreen((80, 5))
-                    self.PopupMenu(self.playbackMenu, self.ScreenToClient(pos))
-                except Exception:
-                    pass
-                return
+        # For Alt+F and Alt+P, do not intercept with PopupMenu (causes
+        # !IsAttached() assertion on attached menus). Let the native
+        # menubar mnemonic handling do its job.
+        if e.AltDown() and kc in (ord('F'), ord('f'), ord('P'), ord('p')):
+            e.Skip()
+            return
         e.Skip()
 
     def OnClose(self, e):
