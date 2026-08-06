@@ -190,8 +190,31 @@ def render_shaded_numba(
         dy = y2 - y1
         length = np.sqrt(dx*dx + dy*dy)
         if length <= 0: continue
-        normal_x = -dy / length
-        normal_y = dx / length
+        # Tangent (along stitch) and normal (across stitch)
+        tangent_x = dx / length
+        tangent_y = dy / length
+        normal_x = -tangent_y
+        normal_y = tangent_x
+
+        # Fixed light direction in screen space (top-left, like classic UI)
+        # This makes shading direction-independent.
+        light_x = -0.5
+        light_y = -0.8660254  # sin 60 deg, normalized vector
+
+        # Canonicalize normal to always point towards light.
+        # This removes flip when stitch goes left->right vs right->left.
+        if normal_x * light_x + normal_y * light_y < 0.0:
+            normal_x = -normal_x
+            normal_y = -normal_y
+
+        # How much the stitch is perpendicular to light.
+        # For a cylinder, highlight is strongest when tangent is perpendicular to light.
+        # dot_tl = tangent dot light
+        dot_tl = tangent_x * light_x + tangent_y * light_y
+        # perp_factor = sin(angle) = sqrt(1 - cos^2)
+        perp_factor_sq = 1.0 - dot_tl * dot_tl
+        if perp_factor_sq < 0.0: perp_factor_sq = 0.0
+        perp_factor = np.sqrt(perp_factor_sq)  # 0 = parallel, 1 = perpendicular
 
         # Precompute variants for thread shading.
         # For realistic we want brighter variants, not dark mush.
@@ -245,8 +268,8 @@ def render_shaded_numba(
                         if 0 <= xi < w and 0 <= yi < h:
                             if use_realistic:
                                 # Cylindrical shading - bright center, slightly darker edges
+                                # across is now canonical (light side = +1) independent of stitch direction
                                 normal_position = ox * normal_x + oy * normal_y
-                                # -1 .. 1 across the thread width
                                 across = normal_position / hw if hw > 0.001 else 0.0
                                 if across < -1.0: across = -1.0
                                 if across >  1.0: across =  1.0
@@ -259,19 +282,24 @@ def render_shaded_numba(
                                 gg = int(g_dark + (g_bright - g_dark) * cyl)
                                 bb = int(b_dark + (b_bright - b_dark) * cyl)
 
-                                # Specular highlight - narrow strip offset from center
-                                # Light from top-left -> offset -0.30
-                                spec_center = -0.30
+                                # Specular highlight - always on light side, stable regardless of direction
+                                # Light side is +towards light after canonicalization
+                                spec_center = 0.30  # on light side (positive)
                                 spec_width = 0.28
                                 spec_dist = across - spec_center
                                 if spec_dist < 0: spec_dist = -spec_dist
                                 if spec_dist < spec_width:
                                     spec = 1.0 - spec_dist / spec_width
-                                    spec = spec * spec  # sharper falloff
-                                    # Fade specular near stitch ends
+                                    spec = spec * spec
+                                    # Fade near ends
                                     along = t if t < 0.5 else 1.0 - t
                                     if along < 0.15:
                                         spec *= along / 0.15
+                                    # Modulate by angle between stitch and light
+                                    # When stitch is perpendicular to light, highlight is strongest
+                                    # When parallel, highlight fades - physically correct for cylinder
+                                    angle_mod = 0.35 + 0.65 * perp_factor
+                                    spec *= angle_mod
                                     # Add white specular
                                     spec_strength = spec * 0.75
                                     rr = int(rr + (255 - rr) * spec_strength)
