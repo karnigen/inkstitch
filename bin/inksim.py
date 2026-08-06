@@ -73,7 +73,7 @@ import time
 import numpy as np
 import numba
 import pystitch as emb
-from PIL import Image, ImageDraw, PngImagePlugin
+from PIL import Image, ImageDraw, ImageFilter, PngImagePlugin
 
 @numba.njit
 def render_grid_numba(buf, zoom, pan_x, pan_y):
@@ -2291,11 +2291,12 @@ class Frame(wx.Frame):
             min_x, min_y, max_x, max_y = self.viewer.bounds
             width = max(1, round((max_x - min_x) / 25.4 * dpi))
             height = max(1, round((max_y - min_y) / 25.4 * dpi))
+        render_scale = 3 if shaded else 1
         image, metadata = render_export_image(
             self.viewer.stitches_np,
             self.viewer.bounds,
-            width,
-            height,
+            width * render_scale,
+            height * render_scale,
             self.viewer.line_width,
             dpi=dpi,
             background=background,
@@ -2304,6 +2305,11 @@ class Frame(wx.Frame):
             dark_factor=self.viewer.dark_factor,
             light_factor=self.viewer.light_factor,
         )
+        if render_scale > 1:
+            image = image.resize((width, height), Image.Resampling.LANCZOS)
+            image = image.filter(
+                ImageFilter.UnsharpMask(radius=0.55, percent=115, threshold=2)
+            )
         image.save(path, "PNG", pnginfo=metadata, dpi=(dpi, dpi))
         return True
 
