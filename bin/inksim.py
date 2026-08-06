@@ -1407,6 +1407,7 @@ class Frame(wx.Frame):
         super().__init__(None, title=APP_TITLE, size=init_size)
         self.is_fullscreen = False
         self._should_maximize_default = should_maximize_default
+        # TODO: Consider migrating wx.Config to an explicit XDG config path.
         self.config = wx.Config(APP_TITLE)
         self.last_directory = self.config.Read("last_directory", "")
         if initial_file and Path(initial_file).is_file():
