@@ -13,6 +13,10 @@ script_dir = Path(__file__).resolve().parent
 # !!! Hardcoded relative path to the virtual environment directory - adjust if you move this script.
 venv_dir = (script_dir / ".." / ".venv").resolve()
 APP_TITLE = "InkSim"
+DEFAULT_STATUS_TEXT = (
+    "Space=play/pause | C=center | F=fit | F11=fullscreen | "
+    "Ctrl+Arrows=color | G=grid H=help"
+)
 DENSITY_RADIUS_MM = 2.5
 DENSITY_WARNING_PER_MM2 = 3.0
 DENSITY_CRITICAL_PER_MM2 = 6.0
@@ -1286,15 +1290,26 @@ class EmbroideryViewerPanel(wx.Panel):
         """Calculate the density map once, on demand, using the Numba kernel."""
         if self.density_ready or len(self.stitch_points_np) == 0:
             return
+        frame = wx.GetTopLevelParent(self)
+        if hasattr(frame, "SetStatusText"):
+            frame.SetStatusText("Calculating stitch density...")
+        wx.BeginBusyCursor()
+        wx.SafeYield(frame, True)
         min_x, min_y, max_x, max_y = self.bounds
-        self.stitch_density_np = calculate_stitch_density_numba(
-            self.stitch_points_np,
-            min_x,
-            min_y,
-            max_x,
-            max_y,
-        )
+        try:
+            self.stitch_density_np = calculate_stitch_density_numba(
+                self.stitch_points_np,
+                min_x,
+                min_y,
+                max_x,
+                max_y,
+            )
+        finally:
+            wx.EndBusyCursor()
         self.density_ready = True
+        if hasattr(frame, "SetStatusText"):
+            frame.SetStatusText("Density map ready")
+            wx.CallLater(1500, frame.SetStatusText, DEFAULT_STATUS_TEXT)
         self.need_redraw = True
         self.Refresh()
 
@@ -1636,9 +1651,7 @@ class Frame(wx.Frame):
 
         # Set up the status bar with instructions.
         self.CreateStatusBar()
-        self.SetStatusText(
-            "Space=play/pause | C=center | F=fit | F11=fullscreen | Ctrl+Arrows=color | G=grid H=help"
-        )
+        self.SetStatusText(DEFAULT_STATUS_TEXT)
 
         # Window geometry
         if window_size:
