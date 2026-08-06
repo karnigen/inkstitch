@@ -131,7 +131,7 @@ def render_shaded_numba(
     zoom,
     pan_x,
     pan_y,
-    use_gradient,
+    use_shaded,
     line_width,
     dark_factor,
     light_factor,
@@ -185,7 +185,7 @@ def render_shaded_numba(
             y = y1 + dy * t
 
             # Optional gradient along the segment to make stitches look less flat.
-            if use_gradient:
+            if use_shaded:
                 r = int(r_dark + (r_light - r_dark) * t)
                 g = int(g_dark + (g_light - g_dark) * t)
                 b = int(b_dark + (b_light - b_dark) * t)
@@ -319,7 +319,8 @@ def get_supported_input_wildcard():
 
 
 def render_export_image(stitches, bounds, width, height, line_width, dpi=None,
-                        background="transparent", grid=False):
+                        background="transparent", grid=False, shaded=False,
+                        dark_factor=0.75, light_factor=0.45):
     """Render clean embroidery geometry into a standalone RGBA PNG image."""
     image = Image.new("RGBA", (width, height), (255, 255, 255, 0))
     draw = ImageDraw.Draw(image)
@@ -350,23 +351,54 @@ def render_export_image(stitches, bounds, width, height, line_width, dpi=None,
             if 0 <= y < height:
                 draw.line((0, y, width, y), fill=grid_color, width=1)
 
-    stroke_width = max(1, round(line_width * zoom))
+    stroke_width = max(1, round(max(line_width, 0.7) * zoom))
     for x1, y1, x2, y2, red, green, blue in stitches:
-        draw.line(
-            (
-                round(x1 * zoom + offset_x),
-                round(y1 * zoom + offset_y),
-                round(x2 * zoom + offset_x),
-                round(y2 * zoom + offset_y),
-            ),
-            fill=(int(red), int(green), int(blue), 255),
-            width=stroke_width,
+        start = (x1 * zoom + offset_x, y1 * zoom + offset_y)
+        end = (x2 * zoom + offset_x, y2 * zoom + offset_y)
+        if not shaded:
+            draw.line(
+                (round(start[0]), round(start[1]), round(end[0]), round(end[1])),
+                fill=(int(red), int(green), int(blue), 255),
+                width=stroke_width,
+            )
+            continue
+        dark = (
+            int(red * dark_factor),
+            int(green * dark_factor),
+            int(blue * dark_factor),
         )
+        light = (
+            int(red + (255 - red) * light_factor),
+            int(green + (255 - green) * light_factor),
+            int(blue + (255 - blue) * light_factor),
+        )
+        for sample in range(4):
+            start_ratio = sample / 4
+            end_ratio = (sample + 1) / 4
+            start_point = (
+                round(start[0] + (end[0] - start[0]) * start_ratio),
+                round(start[1] + (end[1] - start[1]) * start_ratio),
+            )
+            end_point = (
+                round(start[0] + (end[0] - start[0]) * end_ratio),
+                round(start[1] + (end[1] - start[1]) * end_ratio),
+            )
+            ratio = (start_ratio + end_ratio) / 2
+            color = tuple(
+                int(dark[channel] + (light[channel] - dark[channel]) * ratio)
+                for channel in range(3)
+            )
+            draw.line(
+                (*start_point, *end_point),
+                fill=(*color, 255),
+                width=stroke_width,
+            )
 
     metadata = PngImagePlugin.PngInfo()
     metadata.add_text("InkSim design size", f"{design_width:.2f} x {design_height:.2f} mm")
     metadata.add_text("InkSim background", background)
     metadata.add_text("InkSim layers", "embroidery only")
+    metadata.add_text("InkSim rendering", "shaded" if shaded else "flat")
     if dpi:
         metadata.add_text("InkSim DPI", str(dpi))
     return image, metadata
@@ -1291,7 +1323,7 @@ class EmbroideryViewerPanel(wx.Panel):
                 "H=help, Space=play/pause, Ctrl+Arrows=color, Alt+Arrows=1", 20, 45
             )
             return
-        use_gradient = self.zoom > 1.2
+        use_shaded = self.zoom > 1.2
         buf = np.full((h, w, 3), 255, dtype=np.uint8)
         if self.show_grid:
             render_grid_numba(buf, self.zoom, self.pan_x, self.pan_y)
@@ -1303,7 +1335,7 @@ class EmbroideryViewerPanel(wx.Panel):
                 self.zoom,
                 self.pan_x,
                 self.pan_y,
-                use_gradient,
+                use_shaded,
                 self.line_width,
                 self.dark_factor,
                 self.light_factor,
@@ -1524,6 +1556,9 @@ class Frame(wx.Frame):
         fileMenu = wx.Menu()
         openItem = fileMenu.Append(wx.ID_OPEN, "Open embroidery file\tCtrl+O")
         exportPrintItem = fileMenu.Append(wx.ID_ANY, "Export PNG for print...")
+        exportShadedItem = fileMenu.Append(
+            wx.ID_ANY, "Export shaded PNG for print..."
+        )
         exportIconItem = fileMenu.Append(wx.ID_ANY, "Export preview PNG...")
         centerItem = fileMenu.Append(wx.ID_ANY, "Center design\tC")
         fitItem = fileMenu.Append(wx.ID_ANY, "Fit design to window\tF")
@@ -1575,6 +1610,7 @@ class Frame(wx.Frame):
         self.Bind(wx.EVT_CLOSE, self.OnClose)
         self.Bind(wx.EVT_MENU, self.OnOpen, openItem)
         self.Bind(wx.EVT_MENU, self.ExportPrintPng, exportPrintItem)
+        self.Bind(wx.EVT_MENU, self.ExportShadedPng, exportShadedItem)
         self.Bind(wx.EVT_MENU, self.ExportIconPng, exportIconItem)
         self.Bind(wx.EVT_MENU, lambda e: self.viewer.CenterDesign(), centerItem)
         self.Bind(wx.EVT_MENU, lambda e: self.viewer.FitToScreen(), fitItem)
@@ -1748,7 +1784,7 @@ class Frame(wx.Frame):
         return path.with_suffix(".png")
 
     def ExportPng(self, path, icon=False, dpi=300, background="transparent",
-                  grid=False):
+                  grid=False, shaded=False):
         """Export clean embroidery geometry as a PNG file."""
         if self.viewer.stitches_np.shape[0] == 0:
             return False
@@ -1767,15 +1803,24 @@ class Frame(wx.Frame):
             dpi=dpi,
             background=background,
             grid=grid,
+            shaded=shaded,
+            dark_factor=self.viewer.dark_factor,
+            light_factor=self.viewer.light_factor,
         )
         image.save(path, "PNG", pnginfo=metadata, dpi=(dpi, dpi))
         return True
 
     def ExportPrintPng(self, e):
-        """Export a 300 DPI transparent PNG at the design's physical size."""
+        """Export a flat 300 DPI PNG at the design's physical size."""
         path = self._choose_export_path("Export PNG for print")
         if path:
             self.ExportPng(path, dpi=300)
+
+    def ExportShadedPng(self, e):
+        """Export a shaded 300 DPI PNG at the design's physical size."""
+        path = self._choose_export_path("Export shaded PNG for print")
+        if path:
+            self.ExportPng(path, dpi=300, shaded=True)
 
     def ExportIconPng(self, e):
         """Export a 256 pixel transparent preview PNG."""
@@ -1851,6 +1896,11 @@ if __name__ == "__main__":
         help="Export a clean print PNG and exit",
     )
     parser.add_argument(
+        "--export-shaded-png",
+        metavar="PATH",
+        help="Export a shaded print PNG and exit",
+    )
+    parser.add_argument(
         "--export-icon",
         metavar="PATH",
         help="Export a clean 256px preview PNG and exit",
@@ -1874,7 +1924,19 @@ if __name__ == "__main__":
     )
     args=parser.parse_args()
 
-    export_requested = args.export_png or args.export_icon
+    export_paths = [
+        path for path in (
+            args.export_png,
+            args.export_shaded_png,
+            args.export_icon,
+        )
+        if path
+    ]
+    if len(export_paths) > 1:
+        parser.error("choose only one export option at a time")
+    if args.dpi <= 0:
+        parser.error("DPI must be greater than zero")
+    export_requested = bool(export_paths)
     if export_requested and not args.input_file:
         parser.error(
             "an input embroidery file is required for export; "
@@ -1895,13 +1957,14 @@ if __name__ == "__main__":
         batch=export_requested,
     )
     if export_requested:
-        export_path = args.export_png or args.export_icon
+        export_path = export_paths[0]
         success = frame.ExportPng(
             export_path,
             icon=bool(args.export_icon),
             dpi=96 if args.export_icon else args.dpi,
             background=args.export_background,
             grid=args.export_grid,
+            shaded=bool(args.export_shaded_png),
         )
         frame.Destroy()
         raise SystemExit(0 if success else 1)
