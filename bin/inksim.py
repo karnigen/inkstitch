@@ -10,8 +10,6 @@ import argparse
 
 script_dir = Path(__file__).resolve().parent
 
-# !!! Hardcoded relative path to the virtual environment directory - adjust if you move this script.
-venv_dir = (script_dir / ".." / ".venv").resolve()
 APP_TITLE = "InkSim"
 DEFAULT_STATUS_TEXT = (
     "Space=play/pause | C=center | F=fit | F11=fullscreen | "
@@ -32,20 +30,32 @@ AUTO_THREAD_COLORS = (
 )
 
 def ensure_venv():
-    # print(f"{sys.prefix=}"); print(f"{sys.base_prefix=}")
-    if sys.prefix != sys.base_prefix: # we are in a virtual environment
+    if sys.prefix != sys.base_prefix:
         return
 
-    # Path to the Python .venv (Linux/macOS vs Windows)
-    if os.name == "nt":
-        venv_python = venv_dir / "Scripts" / "python.exe"
+    active_venv = os.environ.get("VIRTUAL_ENV")
+    if active_venv:
+        project_root = Path(active_venv).resolve()
     else:
-        venv_python = venv_dir / "bin" / "python"
+        project_root = next(
+            (
+                parent
+                for parent in (script_dir, *script_dir.parents)
+                if (parent / "pyproject.toml").is_file()
+            ),
+            None,
+        )
+        if project_root is None:
+            return
+        project_root = project_root / ".venv"
+
+    if os.name == "nt":
+        venv_python = project_root / "Scripts" / "python.exe"
+    else:
+        venv_python = project_root / "bin" / "python"
 
     if venv_python.exists():
         os.execv(venv_python, [venv_python] + sys.argv)
-    else:
-        print(f"Warning: Virtual environment not found at {venv_dir}. Running with system Python.", file=sys.stderr)
 
 # restart the virtual environment if not already active
 ensure_venv()
