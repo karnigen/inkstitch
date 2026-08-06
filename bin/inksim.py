@@ -316,6 +316,20 @@ def get_supported_input_wildcard():
     patterns = ";".join(f"*.{ext}" for ext in sorted(extensions))
     return f"Embroidery files ({patterns})|{patterns}|All files|*.*"
 
+
+class EmbroideryFileDropTarget(wx.FileDropTarget):
+    """Open the first dropped file in the owning frame."""
+
+    def __init__(self, frame):
+        super().__init__()
+        self.frame = frame
+
+    def OnDropFiles(self, x, y, filenames):
+        if filenames:
+            self.frame.OpenFile(filenames[0])
+        return True
+
+
 class ProgressBarPanel(wx.Panel):
     """Interactive stitch timeline shown below the embroidery viewer.
 
@@ -1440,6 +1454,7 @@ class Frame(wx.Frame):
         self.viewer = EmbroideryViewerPanel(main_panel, None)
         self.progress = ProgressBarPanel(main_panel, self.viewer)
         self.viewer.progress_bar = self.progress
+        self.viewer.SetDropTarget(EmbroideryFileDropTarget(self))
 
         sizer.Add(self.viewer, 1, wx.EXPAND)
         sizer.Add(self.progress, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM,
@@ -1651,20 +1666,25 @@ class Frame(wx.Frame):
             style=wx.FD_OPEN,
         )
         if dlg.ShowModal() == wx.ID_OK:
-            path = dlg.GetPath()
-            if self.viewer.LoadDesign(path, fit_to_screen=True):
-                selected_path = Path(path).resolve()
-                self.last_directory = str(selected_path.parent)
-                self.config.Write("last_directory", self.last_directory)
-                self.config.Flush()
-                total = self.viewer.stitches_np.shape[0]
-                bw = self.viewer.bounds[2] - self.viewer.bounds[0]
-                bh = self.viewer.bounds[3] - self.viewer.bounds[1]
-                self.SetTitle(
-                    f"{APP_TITLE} - {selected_path.name} - {total} sts - {bw:.1f}x{bh:.1f}mm"
-                )
-                self.progress.Refresh()
+            self.OpenFile(dlg.GetPath())
         dlg.Destroy()
+
+    def OpenFile(self, path):
+        """Load a file and update window metadata after a successful load."""
+        selected_path = Path(path).resolve()
+        if not self.viewer.LoadDesign(str(selected_path), fit_to_screen=True):
+            return False
+        self.last_directory = str(selected_path.parent)
+        self.config.Write("last_directory", self.last_directory)
+        self.config.Flush()
+        total = self.viewer.stitches_np.shape[0]
+        bw = self.viewer.bounds[2] - self.viewer.bounds[0]
+        bh = self.viewer.bounds[3] - self.viewer.bounds[1]
+        self.SetTitle(
+            f"{APP_TITLE} - {selected_path.name} - {total} sts - {bw:.1f}x{bh:.1f}mm"
+        )
+        self.progress.Refresh()
+        return True
 
     def ToggleFullScreen(self):
         """Toggle undecorated fullscreen without changing the viewport."""
