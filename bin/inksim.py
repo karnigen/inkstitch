@@ -52,6 +52,7 @@ import time
 import numpy as np
 import numba
 import pystitch as emb
+from PIL import Image, ImageDraw, PngImagePlugin
 
 @numba.njit
 def render_grid_numba(buf, zoom, pan_x, pan_y):
@@ -315,6 +316,60 @@ def get_supported_input_wildcard():
 
     patterns = ";".join(f"*.{ext}" for ext in sorted(extensions))
     return f"Embroidery files ({patterns})|{patterns}|All files|*.*"
+
+
+def render_export_image(stitches, bounds, width, height, line_width, dpi=None,
+                        background="transparent", grid=False):
+    """Render clean embroidery geometry into a standalone RGBA PNG image."""
+    image = Image.new("RGBA", (width, height), (255, 255, 255, 0))
+    draw = ImageDraw.Draw(image)
+    if background == "white":
+        draw.rectangle((0, 0, width, height), fill=(255, 255, 255, 255))
+
+    min_x, min_y, max_x, max_y = bounds
+    design_width = max(max_x - min_x, 1.0)
+    design_height = max(max_y - min_y, 1.0)
+    margin = max(12, min(width, height) * 0.06)
+    zoom = min(
+        (width - 2 * margin) / design_width,
+        (height - 2 * margin) / design_height,
+    )
+    offset_x = (width - design_width * zoom) / 2 - min_x * zoom
+    offset_y = (height - design_height * zoom) / 2 - min_y * zoom
+
+    if grid:
+        grid_color = (205, 205, 205, 150)
+        for grid_x in range(int(np.floor(min_x / 10)) * 10,
+                           int(np.ceil(max_x / 10)) * 10 + 1, 10):
+            x = int(grid_x * zoom + offset_x)
+            if 0 <= x < width:
+                draw.line((x, 0, x, height), fill=grid_color, width=1)
+        for grid_y in range(int(np.floor(min_y / 10)) * 10,
+                           int(np.ceil(max_y / 10)) * 10 + 1, 10):
+            y = int(grid_y * zoom + offset_y)
+            if 0 <= y < height:
+                draw.line((0, y, width, y), fill=grid_color, width=1)
+
+    stroke_width = max(1, round(line_width * zoom))
+    for x1, y1, x2, y2, red, green, blue in stitches:
+        draw.line(
+            (
+                round(x1 * zoom + offset_x),
+                round(y1 * zoom + offset_y),
+                round(x2 * zoom + offset_x),
+                round(y2 * zoom + offset_y),
+            ),
+            fill=(int(red), int(green), int(blue), 255),
+            width=stroke_width,
+        )
+
+    metadata = PngImagePlugin.PngInfo()
+    metadata.add_text("InkSim design size", f"{design_width:.2f} x {design_height:.2f} mm")
+    metadata.add_text("InkSim background", background)
+    metadata.add_text("InkSim layers", "embroidery only")
+    if dpi:
+        metadata.add_text("InkSim DPI", str(dpi))
+    return image, metadata
 
 
 class EmbroideryFileDropTarget(wx.FileDropTarget):
@@ -1413,6 +1468,7 @@ class Frame(wx.Frame):
         window_size=None,
         window_position=None,
         autoplay=False,
+        batch=False,
     ):
         """Build the application window and optionally open a design file."""
         # Decide initial size before super().__init__
@@ -1467,6 +1523,8 @@ class Frame(wx.Frame):
 
         fileMenu = wx.Menu()
         openItem = fileMenu.Append(wx.ID_OPEN, "Open embroidery file\tCtrl+O")
+        exportPrintItem = fileMenu.Append(wx.ID_ANY, "Export PNG for print...")
+        exportIconItem = fileMenu.Append(wx.ID_ANY, "Export preview PNG...")
         centerItem = fileMenu.Append(wx.ID_ANY, "Center design\tC")
         fitItem = fileMenu.Append(wx.ID_ANY, "Fit design to window\tF")
         fullscreenItem = fileMenu.Append(wx.ID_ANY, "Fullscreen\tF11")
@@ -1516,6 +1574,8 @@ class Frame(wx.Frame):
         # Bind menu items to their handlers.
         self.Bind(wx.EVT_CLOSE, self.OnClose)
         self.Bind(wx.EVT_MENU, self.OnOpen, openItem)
+        self.Bind(wx.EVT_MENU, self.ExportPrintPng, exportPrintItem)
+        self.Bind(wx.EVT_MENU, self.ExportIconPng, exportIconItem)
         self.Bind(wx.EVT_MENU, lambda e: self.viewer.CenterDesign(), centerItem)
         self.Bind(wx.EVT_MENU, lambda e: self.viewer.FitToScreen(), fitItem)
         self.Bind(wx.EVT_MENU, lambda e: self.ToggleFullScreen(), fullscreenItem)
@@ -1564,6 +1624,8 @@ class Frame(wx.Frame):
                 f"{APP_TITLE} - {Path(initial_file).name} - {total} sts"
             )
 
+        if batch:
+            return
         if fullscreen:
             self.is_fullscreen = True
             self.Freeze()
@@ -1669,6 +1731,58 @@ class Frame(wx.Frame):
             self.OpenFile(dlg.GetPath())
         dlg.Destroy()
 
+    def _choose_export_path(self, title):
+        """Ask for a PNG destination and return it, or None if cancelled."""
+        dlg = wx.FileDialog(
+            self,
+            title,
+            wildcard="PNG files (*.png)|*.png",
+            style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT,
+        )
+        try:
+            if dlg.ShowModal() != wx.ID_OK:
+                return None
+            path = Path(dlg.GetPath())
+        finally:
+            dlg.Destroy()
+        return path.with_suffix(".png")
+
+    def ExportPng(self, path, icon=False, dpi=300, background="transparent",
+                  grid=False):
+        """Export clean embroidery geometry as a PNG file."""
+        if self.viewer.stitches_np.shape[0] == 0:
+            return False
+        if icon:
+            width = height = 256
+        else:
+            min_x, min_y, max_x, max_y = self.viewer.bounds
+            width = max(1, round((max_x - min_x) / 25.4 * dpi))
+            height = max(1, round((max_y - min_y) / 25.4 * dpi))
+        image, metadata = render_export_image(
+            self.viewer.stitches_np,
+            self.viewer.bounds,
+            width,
+            height,
+            self.viewer.line_width,
+            dpi=dpi,
+            background=background,
+            grid=grid,
+        )
+        image.save(path, "PNG", pnginfo=metadata, dpi=(dpi, dpi))
+        return True
+
+    def ExportPrintPng(self, e):
+        """Export a 300 DPI transparent PNG at the design's physical size."""
+        path = self._choose_export_path("Export PNG for print")
+        if path:
+            self.ExportPng(path, dpi=300)
+
+    def ExportIconPng(self, e):
+        """Export a 256 pixel transparent preview PNG."""
+        path = self._choose_export_path("Export preview PNG")
+        if path:
+            self.ExportPng(path, icon=True, dpi=96)
+
     def OpenFile(self, path):
         """Load a file and update window metadata after a successful load."""
         selected_path = Path(path).resolve()
@@ -1731,16 +1845,64 @@ if __name__ == "__main__":
         type=lambda value: _parse_pair(value, "position", ","),
         help="Window position, for example 100,50",
     )
+    parser.add_argument(
+        "--export-png",
+        metavar="PATH",
+        help="Export a clean print PNG and exit",
+    )
+    parser.add_argument(
+        "--export-icon",
+        metavar="PATH",
+        help="Export a clean 256px preview PNG and exit",
+    )
+    parser.add_argument(
+        "--dpi",
+        type=int,
+        default=300,
+        help="DPI for --export-png (default: 300)",
+    )
+    parser.add_argument(
+        "--export-background",
+        choices=("transparent", "white"),
+        default="transparent",
+        help="PNG background (default: transparent)",
+    )
+    parser.add_argument(
+        "--export-grid",
+        action="store_true",
+        help="Add a 10 mm grid to exported PNG",
+    )
     args=parser.parse_args()
+
+    export_requested = args.export_png or args.export_icon
+    if export_requested and not args.input_file:
+        parser.error(
+            "an input embroidery file is required for export; "
+            "use: inksim INPUT_FILE --export-png OUTPUT.png"
+        )
+    if args.input_file and not Path(args.input_file).is_file():
+        parser.error(f"input embroidery file not found: {args.input_file}")
 
     window_size = args.size
     window_position = args.position
-    app=wx.App()
-    Frame(
+    app=wx.App(not export_requested)
+    frame = Frame(
         initial_file=args.input_file,
         fullscreen=args.fullscreen,
         window_size=window_size,
         window_position=window_position,
         autoplay=args.play,
+        batch=export_requested,
     )
+    if export_requested:
+        export_path = args.export_png or args.export_icon
+        success = frame.ExportPng(
+            export_path,
+            icon=bool(args.export_icon),
+            dpi=96 if args.export_icon else args.dpi,
+            background=args.export_background,
+            grid=args.export_grid,
+        )
+        frame.Destroy()
+        raise SystemExit(0 if success else 1)
     app.MainLoop()
